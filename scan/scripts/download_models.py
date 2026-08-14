@@ -22,31 +22,41 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = PROJECT_ROOT / "models"
 MANIFEST_PATH = MODELS_DIR / ".manifest.json"
 
-# name -> 目标子目录 / 国内源（modelscope 优先，hf_mirror 兜底）/ 完整性关键文件
+# name -> 目标子目录 / 国内源（modelscope 优先，hf_mirror 兜底）/ 完整性关键文件 / 下载过滤
+# 权重文件取任一即视为完整；过滤掉 onnx/双格式权重等冗余，避免多下数 GB
 MODELS = {
     "whisper-small": {
         "dir": "whisper-small",
         "modelscope": "pengzhendong/faster-whisper-small",
         "hf_mirror": "Systran/faster-whisper-small",
         "key_files": ["model.bin", "config.json"],
+        "weights": [],
+        "ignore": [],
     },
     "whisper-medium": {
         "dir": "whisper-medium",
         "modelscope": "pengzhendong/faster-whisper-medium",
         "hf_mirror": "Systran/faster-whisper-medium",
         "key_files": ["model.bin", "config.json"],
+        "weights": [],
+        "ignore": [],
     },
     "bge-m3": {
         "dir": "bge-m3",
         "modelscope": "BAAI/bge-m3",
         "hf_mirror": "BAAI/bge-m3",
         "key_files": ["config.json"],
+        # 注意：HF 仓库根目录只有 pytorch_model.bin（无 model.safetensors），不能过滤
+        "weights": ["model.safetensors", "pytorch_model.bin"],
+        "ignore": ["onnx/*", "*.onnx", "*.ot", "*.h5", "*.msgpack", "flax_model.msgpack", "imgs/*", ".DS_Store"],
     },
     "bge-reranker-v2-m3": {
         "dir": "bge-reranker-v2-m3",
         "modelscope": "BAAI/bge-reranker-v2-m3",
         "hf_mirror": "BAAI/bge-reranker-v2-m3",
         "key_files": ["config.json"],
+        "weights": ["model.safetensors", "pytorch_model.bin"],
+        "ignore": ["onnx/*", "*.onnx", "*.ot", "*.h5", "*.msgpack", "flax_model.msgpack", "imgs/*", ".DS_Store"],
     },
 }
 
@@ -65,7 +75,12 @@ def _complete(name: str) -> bool:
     d = _target_dir(name)
     if not d.is_dir():
         return False
-    return all((d / f).exists() for f in MODELS[name]["key_files"])
+    spec = MODELS[name]
+    if not all((d / f).exists() for f in spec["key_files"]):
+        return False
+    if spec["weights"] and not any((d / w).exists() for w in spec["weights"]):
+        return False
+    return True
 
 
 def _write_manifest(name: str, source: str) -> None:
@@ -92,9 +107,13 @@ def _download_modelscope(name: str) -> bool:
         print("  [modelscope] 未安装（pip install modelscope），跳过该源")
         return False
     repo = MODELS[name]["modelscope"]
-    print(f"  [modelscope] {repo} → {_target_dir(name)}")
+    print(f"  [modelscope] {repo} -> {_target_dir(name)}")
     try:
-        snapshot_download(repo, local_dir=str(_target_dir(name)))
+        snapshot_download(
+            repo,
+            local_dir=str(_target_dir(name)),
+            ignore_patterns=MODELS[name]["ignore"] or None,
+        )
     except Exception as e:
         print(f"  [modelscope] 失败: {e}")
         return False
@@ -104,14 +123,19 @@ def _download_modelscope(name: str) -> bool:
 def _download_hf_mirror(name: str) -> bool:
     try:
         os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        os.environ.setdefault("HF_HOME", str(PROJECT_ROOT / ".hf_cache"))  # 缓存留在项目内，避免污染用户目录
         from huggingface_hub import snapshot_download
     except ImportError:
         print("  [hf-mirror] huggingface_hub 不可用，跳过")
         return False
     repo = MODELS[name]["hf_mirror"]
-    print(f"  [hf-mirror] {repo} → {_target_dir(name)}")
+    print(f"  [hf-mirror] {repo} -> {_target_dir(name)}")
     try:
-        snapshot_download(repo, local_dir=str(_target_dir(name)))
+        snapshot_download(
+            repo,
+            local_dir=str(_target_dir(name)),
+            ignore_patterns=MODELS[name]["ignore"] or None,
+        )
     except Exception as e:
         print(f"  [hf-mirror] 失败: {e}")
         return False

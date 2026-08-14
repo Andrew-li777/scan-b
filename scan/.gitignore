@@ -33,6 +33,7 @@ tempvideo/
 
 # 本地模型（经 scripts/download_models.py 重新下载，不入库）
 models/
+.hf_cache/
 
 # Testing
 .pytest_cache/

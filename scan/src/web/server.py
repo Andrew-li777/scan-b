@@ -55,7 +55,8 @@ async def progress(task_id: str):
 
 @app.post("/api/analyze")
 async def analyze(url: str = Query(...), parent_dir: str = Query("")):
-    task_id = sanitize_task_id(url.rsplit("/", 1)[-1][:50])
+    # 先去掉尾部斜杠：否则 rsplit("/",1)[-1] 为空串，所有以 / 结尾的 URL 会共用同一个 task_id
+    task_id = sanitize_task_id(url.rstrip("/").rsplit("/", 1)[-1][:50])
     SSE_EVENTS[task_id] = queue.Queue()
     threading.Thread(target=asyncio.run, args=(run_pipeline(url, task_id, parent_dir=parent_dir),), daemon=True).start()
     return {"task_id": task_id}
