@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# API keys & config
+.env
+!.env.example
+
+# Runtime data
+.cache/
+.chromadb/
+/output/
+tempvideo/
+
+# 本地模型（经 scripts/download_models.py 重新下载，不入库）
+models/
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+
+# Claude Code
+.claude/
+CLAUDE.md

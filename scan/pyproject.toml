@@ -1,0 +1,53 @@
+[project]
+name = "video-analyzer"
+version = "0.2.0"
+description = "Video subtitle extraction and content analysis tool (offline-first: Bilibili AI subtitles + local models)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "httpx>=0.28",
+    "youtube-transcript-api>=0.6",
+    "yt-dlp>=2025",
+    "chromadb>=0.5",
+    "sentence-transformers>=3.0",
+    "diskcache>=5.6",
+    "faster-whisper>=1.0",
+    "pydantic-settings>=2.6",
+    "anthropic>=0.60",
+    "opencc-python-reimplemented",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+]
+pdf = [
+    "weasyprint>=62",
+]
+# 国内直连下载模型（ModelScope）需要；hf-mirror 路径用 huggingface_hub（随 sentence-transformers 安装）
+download = [
+    "modelscope>=1.15",
+]
+# 仅 GPU 加速 Whisper 时需要（CPU 模式无需安装）
+gpu = [
+    "nvidia-cublas-cu12",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

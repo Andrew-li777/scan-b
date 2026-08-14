@@ -1,0 +1,14 @@
+fastapi>=0.115
+uvicorn[standard]>=0.34
+httpx>=0.28
+youtube-transcript-api>=0.6
+yt-dlp>=2025
+chromadb>=0.5
+sentence-transformers>=3.0
+diskcache>=5.6
+faster-whisper>=1.0
+pydantic-settings>=2.6
+anthropic>=0.60
+opencc-python-reimplemented
+# GPU 加速（可选）: pip install -r requirements-gpu.txt
+# 模型下载（可选，国内直连）: pip install modelscope 或 pip install -e ".[download]"

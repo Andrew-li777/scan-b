@@ -1,0 +1,2 @@
+# GPU 加速 Whisper 转录专用（CPU 模式无需安装）
+nvidia-cublas-cu12
