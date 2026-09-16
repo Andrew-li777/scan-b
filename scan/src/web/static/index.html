@@ -308,9 +308,6 @@ function setTheme(t) {
   localStorage.setItem('scan-theme', t);
   _applyTheme(t);
 }
-(function() {
-  _applyTheme(localStorage.getItem('scan-theme') || 'auto');
-})();
 
 // ── State ──────────────────────────
 let currentTaskId = null;
@@ -1055,6 +1052,7 @@ function pathShort(p) {
 }
 
 // ── Init ───────────────────────────
+_applyTheme(localStorage.getItem('scan-theme') || 'auto');
 loadHistory();
 </script>
 </body>
