@@ -21,10 +21,16 @@ class Settings(BaseSettings):
     output_dir: str = ""
     obsidian_vault: str = ""
     whisper_model: str = ""
+    # 长音频分段转录：时长超过该阈值(秒)时切成多段，降低峰值内存防 OOM
+    whisper_chunk_seconds: int = 600
+    # 相邻切片的重叠秒数，防止说话人在切片边界被截断丢字
+    whisper_chunk_overlap: float = 2.0
     pdf_backend: str = "auto"  # "auto" | "weasyprint" | "chrome"
 
     rag_rerank: bool = True  # enable cross-encoder reranking for RAG
     rag_recall_multiplier: int = 4  # how many extra candidates to fetch for reranker pool
+    # RAG 总开关：False = 跳过构建检索索引步骤，省 ~1.6GB 常驻内存（whisper+LLM 主流程不受影响）
+    rag_enabled: bool = False
 
     # --- 离线化配置（P0：启动零外网） ---
     model_dir: str = "models"                      # 本地模型根目录（相对 PROJECT_ROOT 或绝对路径）

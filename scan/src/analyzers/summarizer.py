@@ -251,12 +251,29 @@ def _parse_chapters(text: str) -> list[Chapter]:
 
 
 def _extract_json_from_text(text: str) -> list:
-    import re
-    m = re.search(r"\[[\s\S]*?\]", text)
-    if m:
-        import json
-        return json.loads(m.group())
+    """Robustly extract the first valid JSON array from free-form LLM text.
+
+    The old non-greedy regex ``\\[[\\s\\S]*?\\]`` broke when the *content*
+    itself contained brackets (e.g. "低保[最低生活保障]") — it would match
+    up to the first closing bracket and then fail json.loads with
+    "Expecting value" / "Unterminated string". Instead, scan for a JSON
+    value start (``[`` or ``{``) and use ``raw_decode`` so brackets nested
+    *inside* strings are handled correctly.
+    """
+    import json
+
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch not in "[{":
+            continue
+        try:
+            obj, _end = decoder.raw_decode(text, i)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, list):
+            return obj
     return []
+
 
 
 _CONCEPT_SYSTEM = """从视频内容中提取 3-5 个核心概念/术语，返回 JSON 字符串数组。

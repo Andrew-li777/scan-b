@@ -147,16 +147,23 @@ def _sign_wbi(params: dict) -> dict:
 
 
 def fetch_bilibili_audio_url(bvid: str, cid: int) -> tuple[str, str] | None:
-    """Get DASH audio URL from Bilibili playurl API. Returns (url, mime_type) or None."""
+    """Get DASH audio URL from Bilibili playurl API. Returns (url, mime_type) or None.
+    优先取 DASH 音频流；若该视频无 DASH（仅 durl 分段流），回退到第一个分段的
+    durl URL（视频流，whisper/ffmpeg 可提取其中的音频轨）。"""
     try:
         params = {"bvid": bvid, "cid": cid, "fnval": 4048, "fourk": 1}
         r = _retry_get(_BILI_API_PLAYURL, params=params)
         data = r.json()
-        audios = data.get("data", {}).get("dash", {}).get("audio", [])
-        if not audios:
-            return None
-        best = max(audios, key=lambda a: a.get("bandwidth", 0))
-        return best["baseUrl"], best.get("mimeType", "audio/mp4")
+        d = data.get("data") or {}
+        audios = d.get("dash", {}).get("audio", [])
+        if audios:
+            best = max(audios, key=lambda a: a.get("bandwidth", 0))
+            return best["baseUrl"], best.get("mimeType", "audio/mp4")
+        # 回退：无 DASH 时使用 durl 分段流（首段）
+        durl = d.get("durl") or []
+        if durl:
+            return durl[0].get("url"), durl[0].get("mimeType", "video/mp4")
+        return None
     except Exception:
         return None
 

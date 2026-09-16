@@ -1,0 +1,41 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ===== 虚拟环境 =====
+venv/
+.venv/
+env/
+
+# ===== 凭据（绝不入库）=====
+bilibili_cookies.txt
+*.cookie*
+.env
+*.env
+secrets*
+
+# ===== 备份文件 =====
+*.bak
+
+# ===== 模型与运行数据（体积大/可重建）=====
+scan/models/
+scan/output/
+scan/tempvideo/
+scan/.chromadb/
+data/
+logs/
+
+# ===== 日志 =====
+*.log
+
+# ===== 仓库根临时/调试脚本 =====
+/_*.py
+scan/_test_fetch.py
+
+# ===== 编辑器/系统 =====
+.DS_Store
+.idea/
+.vscode/
+*.swp

@@ -7,6 +7,31 @@ from src.config import settings
 _client = Anthropic(**settings.anthropic_kwargs)
 
 
+def _has_text_block(content) -> bool:
+    """True if the response contains a real text block."""
+    for block in content or []:
+        if getattr(block, "type", None) == "text":
+            return True
+    return False
+
+
+def _extract_text(content) -> str:
+    """Extract the text block from an Anthropic response content list.
+
+    DeepSeek's Anthropic-compatible endpoint returns a ThinkingBlock
+    (type="thinking") as the first content item; the real text is in the
+    TextBlock (type="text") after it. Prefer the text block. The thinking
+    content is NEVER returned as the answer — it is model-internal
+    reasoning and is not suitable output.
+    """
+    if not content:
+        return ""
+    for block in content:
+        if getattr(block, "type", None) == "text":
+            return block.text or ""
+    return ""
+
+
 def chat(
     system_prompt: str,
     user_message: str = "",
@@ -14,7 +39,14 @@ def chat(
     model: str | None = None,
     max_tokens: int = 4096,
     messages: list[dict] | None = None,
+    _retries: int = 0,
 ) -> str:
+    """Chat with the LLM.
+
+    If the model consumes the whole token budget on its thinking block and
+    returns no text block, retry once with a larger budget before giving up
+    (thinking text is model-internal and must not leak into output).
+    """
     msgs = messages or [{"role": "user", "content": user_message}]
     r = _client.messages.create(
         model=model or settings.anthropic_model,
@@ -22,12 +54,17 @@ def chat(
         system=system_prompt,
         messages=msgs,
     )
-    # Handle DeepSeek's ThinkingBlock (type="thinking") — find the text block
-    for block in r.content:
-        if getattr(block, "type", None) == "text":
-            return block.text
-    # Fallback for models that don't return thinking blocks
-    return r.content[0].text
+    text = _extract_text(r.content)
+    if not text and _retries < 1:
+        # No text block (thinking likely ate the whole budget) — retry bigger.
+        return chat(
+            system_prompt,
+            messages=msgs,
+            model=model,
+            max_tokens=int(max_tokens * 2),
+            _retries=_retries + 1,
+        )
+    return text
 
 
 def chat_json(system_prompt: str, user_message: str, *, model: str | None = None, max_tokens: int = 4096) -> dict:

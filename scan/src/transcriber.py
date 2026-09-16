@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import site
 import threading
@@ -131,6 +132,21 @@ def _get_model():
         raise RuntimeError("无法加载 Whisper 模型（CPU/GPU 均不可用）")
 
 
+def _release_model():
+    """释放已加载的 Whisper 模型，回收物理内存（含已换出到 swap 的页）。
+
+    转录任务结束后调用，避免模型常驻（~1.3GB）。代价：下次转录需重新加载（慢 10-20s）。
+    保留 _device/_compute_type 缓存，重新加载时无需再次探测设备。
+    """
+    global _whisper_model
+    with _model_lock:
+        if _whisper_model is not None:
+            _whisper_model = None
+            import gc
+            gc.collect()
+            logger.info("Whisper model released, ~1.3GB freed (next transcription will reload)")
+
+
 def download_audio(url: str, progress_cb=None) -> Path:
     _TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
     tmpdir = _TEMP_VIDEO_DIR / str(uuid.uuid4())[:8]
@@ -211,23 +227,37 @@ def _download_bilibili_audio(url: str, tmpdir: Path, progress_cb=None) -> Path:
     if _COOKIE_STR:
         dl_headers["Cookie"] = _COOKIE_STR
 
-    with httpx.stream("GET", audio_url, headers=dl_headers, timeout=120, follow_redirects=True) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("content-length", 0)) or None
-        downloaded = 0
-        with open(outpath, "wb") as f:
-            for chunk in r.iter_bytes(chunk_size=1024 * 1024):
-                f.write(chunk)
-                downloaded += len(chunk)
-                if progress_cb and total:
-                    progress_cb(min(downloaded / total * 100, 99))
+    # 本地修复：B 站部分 CDN 节点（*.bilivideo.com）证书过期导致 SSL 验证失败。
+    # 音频为公开内容，verify=False 可绕过坏节点；仍保留重试以期望 DNS 轮询到正常节点。
+    import time as _time
+
+    _last_err = None
+    for _attempt in range(3):
+        try:
+            with httpx.stream("GET", audio_url, headers=dl_headers, timeout=120,
+                              follow_redirects=True, verify=False) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("content-length", 0)) or None
+                downloaded = 0
+                with open(outpath, "wb") as f:
+                    for chunk in r.iter_bytes(chunk_size=1024 * 1024):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_cb and total:
+                            progress_cb(min(downloaded / total * 100, 99))
+            break
+        except Exception as e:
+            _last_err = e
+            _time.sleep(1)
+    else:
+        raise RuntimeError(f"音频下载失败（已重试 3 次）: {_last_err}")
     if progress_cb:
         progress_cb(100)
     return outpath
 
 
-def transcribe(audio_path: Path, progress_cb=None) -> list[SubtitleEntry]:
-    model = _get_model()
+def _transcribe_single(model, audio_path: Path, progress_cb=None, duration: float = 0) -> list[SubtitleEntry]:
+    """Transcribe one audio file with the already-loaded model. Returns entries (0-100 progress)."""
     segments, info = model.transcribe(
         str(audio_path),
         beam_size=1,
@@ -258,6 +288,194 @@ def transcribe(audio_path: Path, progress_cb=None) -> list[SubtitleEntry]:
     if progress_cb:
         progress_cb(100)
     return entries
+
+
+def _probe_duration(audio_path: Path) -> float:
+    """Return audio duration in seconds using PyAV (no system ffmpeg needed)."""
+    import av
+    container = av.open(str(audio_path))
+    try:
+        stream = container.streams.audio[0]
+        dur = float(stream.duration * stream.time_base) if stream.duration else 0.0
+        if dur <= 0:
+            # Fallback: read frames and track pts
+            max_pts = 0.0
+            for frame in container.decode(stream):
+                if frame.pts is not None:
+                    max_pts = max(max_pts, float(frame.pts * frame.time_base))
+            dur = max_pts
+        return dur
+    finally:
+        container.close()
+
+
+def _cut_audio_chunk(src: Path, out: Path, start: float, end: float):
+    """Cut [start, end] seconds from src into out using PyAV streaming decode.
+
+    Decodes from `start` (backward seek for safety), muxes until `end`.
+    Writes to `out` as m4a/aac to keep the file small.
+    """
+    import av
+    in_c = av.open(str(src))
+    in_s = in_c.streams.audio[0]
+    # try to copy the same codec if available, else fallback to AAC
+    out_c = av.open(str(out), "w")
+    out_s = None
+    try:
+        out_s = out_c.add_stream("aac")
+    except Exception:
+        out_s = out_c.add_stream("mp3")
+    out_s.sample_rate = in_s.codec_context.sample_rate or 16000
+    # Map channel count to a legal layout name (ctx.layout.name can be junk like '1 channels')
+    n_ch = in_s.codec_context.layout.channels if in_s.codec_context.layout else None
+    if n_ch == 1:
+        out_s.layout = "mono"
+    elif n_ch == 2:
+        out_s.layout = "stereo"
+    out_s.bit_rate = in_s.bit_rate or 64000
+
+    # Seek to start (backward) then decode, keeping frames within [start, end]
+    try:
+        in_c.seek(int(start / float(in_s.time_base)), stream=in_s, backward=True)
+    except Exception:
+        # Fallback: no seek, decode from beginning (slower but correct)
+        pass
+
+    t0, t1 = start, end
+    for frame in in_c.decode(in_s):
+        if frame.pts is None:
+            continue
+        ts = float(frame.pts * frame.time_base)
+        if ts + float(frame.duration * frame.time_base) < t0:
+            continue
+        if ts > t1:
+            break
+        for packet in out_s.encode(frame):
+            out_c.mux(packet)
+    for packet in out_s.encode(None):
+        out_c.mux(packet)
+    out_c.close()
+    in_c.close()
+    return out
+
+
+def _dedup_overlaps(entries: list[SubtitleEntry], overlap: float) -> list[SubtitleEntry]:
+    """Merge entries from chunked transcription, dropping duplicated text in overlap zones.
+
+    After chunk offsetting, entries are sorted by start. Only entries whose start lands
+    inside the previous KEPT entry's window (i.e. from the overlap region) are checked:
+    - if its text is near-identical to the previous entry's text -> drop (duplicate)
+    - otherwise keep but clamp its start to the previous entry's end (avoid time overlap)
+    """
+    if not entries:
+        return []
+    entries = sorted(entries, key=lambda e: (e.start, e.end))
+    merged: list[SubtitleEntry] = []
+    last_kept = None
+    for e in entries:
+        if last_kept is not None and e.start < last_kept.end - 0.01:
+            # Only consider entries that actually overlap the previous kept one
+            if _text_similar(e.text, last_kept.text):
+                continue  # duplicate from overlap zone -> drop
+            if e.start < last_kept.end:
+                new_start = last_kept.end
+                if new_start < e.end:
+                    e = SubtitleEntry(start=round(new_start, 2), end=e.end, text=e.text)
+                else:
+                    continue  # fully swallowed
+        merged.append(e)
+        last_kept = e
+    return merged
+
+
+def _text_similar(a: str, b: str) -> bool:
+    """True if a and b are near-duplicates (same utterance transcribed twice).
+
+    Real Whisper repeats of the same audio are near-identical strings; distinct
+    adjacent sentences rarely share 85%+ of character bigrams. Threshold is high
+    on purpose so we only drop true duplicates, never distinct content.
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # Short-cut: one contains the other
+    if len(a) >= 6 and len(b) >= 6 and (a in b or b in a):
+        return True
+    def bigrams(s):
+        return {s[i:i + 2] for i in range(len(s) - 1)}
+    ba, bb = bigrams(a), bigrams(b)
+    if not ba or not bb:
+        return False
+    inter = len(ba & bb)
+    return inter / min(len(ba), len(bb)) >= 0.85
+
+
+def transcribe(audio_path: Path, progress_cb=None) -> list[SubtitleEntry]:
+    model = _get_model()
+    try:
+        duration = _probe_duration(audio_path)
+
+        chunk_len = max(int(settings.whisper_chunk_seconds), 60)
+        overlap = max(float(settings.whisper_chunk_overlap), 0.0)
+
+        # Short audio: single-pass (existing behaviour)
+        if duration <= chunk_len:
+            return _transcribe_single(model, audio_path, progress_cb)
+
+        # Long audio: chunked transcription to bound peak memory
+        logger.info("Long audio (%.1fs > %ds): chunking with %ds overlap", duration, chunk_len, overlap)
+        tmpdir = audio_path.parent
+        all_entries: list[SubtitleEntry] = []
+        n_chunks = int(math.ceil(duration / chunk_len))
+        chunk_i = 0
+        start = 0.0
+        while start < duration:
+            chunk_i += 1
+            end = min(start + chunk_len + overlap, duration)
+            chunk_path = tmpdir / f"chunk_{chunk_i:03d}.m4a"
+            _cut_audio_chunk(audio_path, chunk_path, start, end)
+            chunk_dur = _probe_duration(chunk_path)
+
+            # Progress for this chunk (within-chunk progress scaled to global)
+            def make_cb(c_start, c_dur):
+                def cb(pct):
+                    if progress_cb and c_dur > 0:
+                        global_pct = (c_start + pct / 100 * c_dur) / duration * 100
+                        progress_cb(min(global_pct, 99))
+                return cb
+
+            try:
+                entries = _transcribe_single(model, chunk_path, make_cb(start, chunk_dur))
+            except Exception as e:
+                logger.warning("Chunk %d failed: %s — skipping", chunk_i, e)
+                entries = []
+            finally:
+                try:
+                    chunk_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+            # Offset timestamps to global timeline. Overlap-zone duplicates are
+            # handled later by _dedup_overlaps; do NOT skip entries here (their
+            # local timestamps are meaningless vs the global `offset`).
+            offset = start
+            for e in entries:
+                e.start = round(e.start + offset, 2)
+                e.end = round(e.end + offset, 2)
+            all_entries.extend(entries)
+            logger.info("Chunk %d/%d done: %d entries (offset %.1fs)", chunk_i, n_chunks, len(entries), offset)
+
+            start += chunk_len
+
+        merged = _dedup_overlaps(all_entries, overlap)
+        if progress_cb:
+            progress_cb(100)
+        logger.info("Chunked transcription complete: %d entries after dedup (raw %d)", len(merged), len(all_entries))
+        return merged
+    finally:
+        # 转录结束（无论成败）释放模型，回收物理内存 + swap 页，避免模型常驻
+        _release_model()
 
 
 def cleanup_audio(audio_path: Path):

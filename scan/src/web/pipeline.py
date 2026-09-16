@@ -21,7 +21,6 @@ from src.output.markdown import _OUTPUT_DIR, generate_all
 from src.preprocess.cleaner import clean
 from src.preprocess.dedup import deduplicate
 from src.preprocess.segmenter import build_text, merge_short, segment
-from src.rag.chat import build_index
 from src.transcriber import cleanup_audio, download_audio, transcribe
 from src.translate import (
     needs_translation,
@@ -241,20 +240,23 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
 
         cache.set(task_id, result)
 
-        # Build RAG index
-        push(task_id, "status", "构建检索索引...")
-        segs = segment(subs)
-        seg_texts = [build_text(s) for s in segs]
-        seg_starts = [s[0].start for s in segs]
-        await asyncio.to_thread(build_index, task_id, seg_texts, seg_starts)
+        # Build RAG index (skipped when rag_enabled=False, saves ~1.6GB resident memory)
+        if settings.rag_enabled:
+            push(task_id, "status", "构建检索索引...")
+            from src.rag.chat import build_index
+            from src.rag.vectorstore import index_global
 
-        # Also index into the global cross-video collection
-        from src.rag.vectorstore import index_global
-        global_segs = [
-            (f"{task_id}_{i}", t, seg_starts[i], base_name)
-            for i, t in enumerate(seg_texts)
-        ]
-        await asyncio.to_thread(index_global, global_segs)
+            segs = segment(subs)
+            seg_texts = [build_text(s) for s in segs]
+            seg_starts = [s[0].start for s in segs]
+            await asyncio.to_thread(build_index, task_id, seg_texts, seg_starts)
+
+            # Also index into the global cross-video collection
+            global_segs = [
+                (f"{task_id}_{i}", t, seg_starts[i], base_name)
+                for i, t in enumerate(seg_texts)
+            ]
+            await asyncio.to_thread(index_global, global_segs)
 
         # Build subtitle text preview
         sub_lines = []
