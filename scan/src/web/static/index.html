@@ -381,6 +381,7 @@ async function doLogin(){
   }catch(e){ document.getElementById('loginMsg').textContent = '网络错误'; }
 }
 function logout(){ setAuth(''); updateAuthBadge(); loadHistory(); }
+function requireLogin(){ if(isAdmin()) return true; openLoginModal(); return false; }
 function authFetch(url, opts){
   opts = opts || {};
   opts.headers = _authHeaders(opts.headers);
@@ -608,6 +609,7 @@ function toggleGroup(checkbox, gid) {
 }
 
 async function deleteSelected() {
+  if(!requireLogin()) return;
   const cbs = document.querySelectorAll('.hi-cb:checked');
   if (!cbs.length) return;
   if (!confirm(`确定删除 ${cbs.length} 条历史记录？此操作不可撤销。`)) return;
@@ -645,6 +647,7 @@ function hideCompareModal() {
 }
 
 async function compareSelected() {
+  if(!requireLogin()) return;
   const cbs = document.querySelectorAll('.hi-cb:checked');
   if (cbs.length < 2) { alert('至少选择 2 个视频'); return; }
   if (cbs.length > 5) { alert('单次最多对比 5 个视频'); return; }
@@ -665,6 +668,7 @@ async function compareSelected() {
 }
 
 async function downloadSelectedPdf() {
+  if(!requireLogin()) return;
   const cbs = document.querySelectorAll('.hi-cb:checked');
   if (!cbs.length) return;
   if (cbs.length > 50) { alert('单次最多 50 条'); return; }
@@ -785,6 +789,7 @@ function fmtDate(ts) {
 
 // ── Analyze ────────────────────────
 async function analyze() {
+  if(!requireLogin()) return;
   const url = document.getElementById('urlInput').value.trim();
   if (!url) return;
   // Detect playlist/collection URL (YouTube or Bilibili)
@@ -1009,14 +1014,16 @@ async function renderMindmap(mermaidText) {
 function renderDownloads(files, baseName) {
   const el = document.getElementById('downloads');
   const labels = { subtitles: '完整字幕', overview: '内容概览', keypoints: '重点标示', mindmap: '思维导图', srt: 'SRT 字幕' };
+  // 游客（未登录）点击下载/导出 → 弹登录框，避免裸 403
+  const guard = isAdmin() ? '' : ' onclick="openLoginModal();return false;" title="需登录后下载"';
   const downloads = Object.entries(files).map(([k, v]) => {
     const ext = k === 'srt' ? '' : ' (.md)';
-    return `<a href="/api/download/${encodeURIComponent(v)}" download>${labels[k] || k}${ext}</a>`;
+    return `<a href="/api/download/${encodeURIComponent(v)}" download${guard}>${labels[k] || k}${ext}</a>`;
   }).join('');
   const exports = baseName
     ? `<button class="export-btn" onclick="window.print()" title="浏览器打印对话框，可自选边距/页眉页脚">📄 打印 PDF</button>
-       <a class="export-btn" href="/api/export/${encodeURIComponent(baseName)}?format=pdf" title="后端直接生成 PDF（无对话框）">📕 下载 PDF</a>
-       <a class="export-btn" href="/api/export/${encodeURIComponent(baseName)}?format=html">📦 导出 HTML</a>`
+       <a class="export-btn" href="/api/export/${encodeURIComponent(baseName)}?format=pdf"${guard} title="后端直接生成 PDF（无对话框）">📕 下载 PDF</a>
+       <a class="export-btn" href="/api/export/${encodeURIComponent(baseName)}?format=html"${guard}>📦 导出 HTML</a>`
     : `<button class="export-btn" onclick="window.print()">📄 打印 PDF</button>`;
   el.innerHTML = downloads + exports;
 }
@@ -1042,6 +1049,7 @@ function updateChatHint() {
 }
 
 async function ask() {
+  if(!requireLogin()) return;
   const input = document.getElementById('chatInput');
   const q = input.value.trim();
   if (!q) return;
