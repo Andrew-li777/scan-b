@@ -16,6 +16,8 @@ from src.config import settings
 from src.output.markdown import _OUTPUT_DIR
 from src.rag.chat import ask as rag_ask, global_ask
 from src.web.history import router as history_router, scan_dirs
+from src.web.guest_rules import guest_read_allowed
+from src.web.auth import AuthMiddleware
 from src.output.html_standalone import generate_html_from_history
 from src.web.pipeline import SSE_EVENTS, cancel_task, make_task_id, push, run_pipeline, sanitize_task_id
 
@@ -23,6 +25,14 @@ from src.web.pipeline import SSE_EVENTS, cancel_task, make_task_id, push, run_pi
 batch_tracker: dict[str, dict] = {}
 
 app = FastAPI(title="Video Analyzer")
+
+# 访客模式：游客只读白名单；管理员凭据校验（bcrypt，与 Caddy basicauth 同 hash）
+app.add_middleware(
+    AuthMiddleware,
+    admin_user="scanuser",
+    admin_hash="$2a$14$RI8AXNCa1bO6/YLrAjECKOF4.UrJYs7MM7A1PATvCnaSOep5coXBi",
+    is_read_allowed=guest_read_allowed,
+)
 
 _static = Path(__file__).parent / "static"
 

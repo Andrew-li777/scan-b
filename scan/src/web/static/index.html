@@ -188,6 +188,23 @@ a{color:inherit;text-decoration:none}
   a{color:#000 !important;text-decoration:none}
 }
 @media(max-width:860px){#sidebar{display:none}#sidebarToggle{display:none}.input-box{flex-direction:column}}
+/* ── 登录/游客状态 ── */
+.auth-box{display:flex;align-items:center;gap:8px;margin-left:6px}
+.auth-guest{color:var(--ink-soft);cursor:pointer;border:1px dashed var(--line);padding:3px 8px;border-radius:4px;font-size:.66rem}
+.auth-guest:hover{border-color:var(--accent);color:var(--accent)}
+.auth-admin{color:var(--ok);border:1px solid var(--ok);padding:3px 8px;border-radius:4px;font-size:.66rem}
+.auth-mini-btn{padding:3px 10px;border:1px solid var(--line);border-radius:4px;background:var(--paper-warm);color:var(--ink-soft);cursor:pointer;font-size:.66rem;font-family:var(--font-mono);transition:all .15s}
+.auth-mini-btn:hover{border-color:var(--accent);color:var(--accent)}
+.login-box{width:min(380px,92vw);background:var(--paper);border:1px solid var(--line);border-radius:8px;box-shadow:0 16px 48px rgba(0,0,0,.22)}
+.login-head{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line)}
+.login-head button{background:none;border:1px solid var(--line);color:var(--ink-soft);border-radius:4px;padding:3px 10px;cursor:pointer;font-family:var(--font-mono);font-size:.7rem}
+.login-head button:hover{border-color:var(--accent);color:var(--accent)}
+.login-body{padding:18px}
+.modal-label{display:block;font-family:var(--font-mono);font-size:.62rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-soft);margin:12px 0 4px}
+.login-body input{width:100%;box-sizing:border-box;margin:4px 0;padding:8px 10px;border:1px solid var(--line);border-radius:4px;background:var(--paper-warm);color:var(--ink);font-size:13px;font-family:inherit}
+.login-body input:focus{outline:none;border-color:var(--accent)}
+.login-btn{width:100%;margin-top:10px;padding:8px 0;border:1px solid var(--accent);border-radius:4px;background:transparent;color:var(--accent);font-family:var(--font-mono);font-size:13px;cursor:pointer}
+.login-btn:hover{background:var(--accent);color:#fff}
 </style>
 </head>
 <body>
@@ -230,6 +247,11 @@ a{color:inherit;text-decoration:none}
       <button class="theme-btn" data-theme="auto" onclick="setTheme('auto')">自动</button>
       <button class="theme-btn" data-theme="light" onclick="setTheme('light')">亮</button>
       <button class="theme-btn" data-theme="dark" onclick="setTheme('dark')">暗</button>
+    </div>
+    <div class="auth-box">
+      <span id="auth-badge" class="kicker auth-guest" onclick="openLoginModal()" title="点击登录">游客 · GUEST</span>
+      <button id="auth-btn" class="auth-mini-btn" onclick="openLoginModal()" style="display:none">登录</button>
+      <button id="logout-btn" class="auth-mini-btn" onclick="logout()" style="display:none">退出</button>
     </div>
   </div>
   <div class="input-box">
@@ -283,6 +305,24 @@ a{color:inherit;text-decoration:none}
     </div>
   </div>
 </div>
+<!-- 登录模态框 -->
+<div id="loginModal" class="compare-modal" onclick="if(event.target===this)closeLoginModal()">
+  <div class="login-box">
+    <div class="login-head">
+      <span class="kicker">登录 · SIGN IN</span>
+      <button onclick="closeLoginModal()">✕</button>
+    </div>
+    <div class="login-body">
+      <p class="kicker" style="color:var(--ink-soft);margin-bottom:12px">游客仅可浏览历史记录，解析/对话/下载等操作需登录。</p>
+      <label class="modal-label">账号 · USER</label>
+      <input type="text" id="loginUser" placeholder="账号" autocomplete="username">
+      <label class="modal-label">密码 · PASSWORD</label>
+      <input type="password" id="loginPass" placeholder="密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+      <button onclick="doLogin()" class="login-btn">登录</button>
+      <div id="loginMsg" class="kicker" style="margin-top:8px;color:var(--danger)"></div>
+    </div>
+  </div>
+</div>
 <div id="compareModal" class="compare-modal" onclick="if(event.target===this)hideCompareModal()">
   <div class="compare-box">
     <div class="compare-head">
@@ -307,6 +347,93 @@ function _applyTheme(t) {
 function setTheme(t) {
   localStorage.setItem('scan-theme', t);
   _applyTheme(t);
+}
+
+// ── Auth（游客/管理员） ──────────────
+const AUTH_KEY = 'scan-basic-auth';
+function getAuth(){ try{ return localStorage.getItem(AUTH_KEY) || ''; }catch(e){ return ''; } }
+function setAuth(v){ try{ v ? localStorage.setItem(AUTH_KEY, v) : localStorage.removeItem(AUTH_KEY); }catch(e){} }
+function isAdmin(){ return !!getAuth(); }
+function _authHeaders(h){ const a = getAuth(); if(a){ h = h || {}; h['Authorization'] = 'Basic ' + a; } return h || {}; }
+function updateAuthBadge(){
+  const badge = document.getElementById('auth-badge'), btn = document.getElementById('auth-btn'), lo = document.getElementById('logout-btn');
+  if(!badge) return;
+  if(isAdmin()){
+    badge.textContent = '已登录 · ADMIN'; badge.className = 'kicker auth-admin'; badge.onclick = null; badge.title = '';
+    if(btn) btn.style.display = 'none';
+    if(lo) lo.style.display = 'inline-block';
+  } else {
+    badge.textContent = '游客 · GUEST'; badge.className = 'kicker auth-guest'; badge.onclick = openLoginModal; badge.title = '点击登录';
+    if(btn) btn.style.display = 'inline-block';
+    if(lo) lo.style.display = 'none';
+  }
+}
+function openLoginModal(){ document.getElementById('loginMsg').textContent = ''; document.getElementById('loginModal').classList.add('show'); document.getElementById('loginUser').focus(); }
+function closeLoginModal(){ document.getElementById('loginModal').classList.remove('show'); }
+async function doLogin(){
+  const u = document.getElementById('loginUser').value.trim(), p = document.getElementById('loginPass').value;
+  if(!u || !p){ document.getElementById('loginMsg').textContent = '请输入账号和密码'; return; }
+  const token = btoa(u + ':' + p);
+  try{
+    const r = await fetch('/api/history', { headers: { 'Authorization': 'Basic ' + token } });
+    if(r.ok){ setAuth(token); updateAuthBadge(); closeLoginModal(); document.getElementById('loginPass').value=''; loadHistory(); }
+    else { document.getElementById('loginMsg').textContent = r.status === 401 ? '账号或密码错误' : '登录失败(' + r.status + ')'; }
+  }catch(e){ document.getElementById('loginMsg').textContent = '网络错误'; }
+}
+function logout(){ setAuth(''); updateAuthBadge(); loadHistory(); }
+function authFetch(url, opts){
+  opts = opts || {};
+  opts.headers = _authHeaders(opts.headers);
+  return fetch(url, opts).then(r => {
+    if(r.status === 401){ setAuth(''); updateAuthBadge(); openLoginModal(); }
+    else if(r.status === 403){ openLoginModal(); }
+    return r;
+  });
+}
+function guestCan(method, path){
+  // 游客白名单（与后端一致）：历史列表/详情/思维导图
+  if(method === 'GET' && (path.startsWith('/api/history') || path.startsWith('/api/mindmap/'))) return true;
+  return false;
+}
+/* 带认证头的 SSE 客户端（EventSource 无法自定义 header，改用 fetch 流） */
+function authEventSource(url){
+  const handlers = {};
+  const ctrl = new AbortController();
+  let closed = false;
+  const emit = (ev, payload) => (handlers[ev]||[]).forEach(f => f(payload));
+  fetch(url, { headers: _authHeaders(), signal: ctrl.signal }).then(async r => {
+    if(!r.ok){
+      if(r.status === 401){ setAuth(''); updateAuthBadge(); }
+      if(r.status === 401 || r.status === 403) openLoginModal();
+      emit('error', {data: ''});
+      return;
+    }
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while(true){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream: true});
+      let idx;
+      while((idx = buf.indexOf('\n\n')) >= 0){
+        const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        let ev = 'message', data = '';
+        chunk.split('\n').forEach(l => {
+          if(l.startsWith('event:')) ev = l.slice(6).trim();
+          else if(l.startsWith('data:')) data += l.slice(5).trim();
+        });
+        emit(ev, {data});
+      }
+    }
+    if(!closed){ emit('error', {data: ''}); if(api.onerror) api.onerror(); }
+  }).catch(e => { if(!closed){ emit('error', {data: ''}); if(api.onerror) api.onerror(); } });
+  const api = {
+    addEventListener(ev, fn){ (handlers[ev] = handlers[ev] || []).push(fn); },
+    close(){ closed = true; ctrl.abort(); },
+    onerror: null,
+  };
+  return api;
 }
 
 // ── State ──────────────────────────
@@ -335,7 +462,7 @@ function videoUrl(platform, url, seconds) {
 // ── History ────────────────────────
 async function loadHistory() {
   try {
-    const r = await fetch('/api/history');
+    const r = await authFetch('/api/history');
     currentHistory = await r.json();
     const list = document.getElementById('historyList');
     if (!currentHistory.length) {
@@ -489,7 +616,7 @@ async function deleteSelected() {
   prog.style.display = 'flex';
   prog.innerHTML = `<div class="bulk-spinner"></div><span>正在删除 ${base_names.length} 条...</span>`;
   try {
-    const r = await fetch('/api/history/batch_delete', {
+    const r = await authFetch('/api/history/batch_delete', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ base_names }),
@@ -524,7 +651,7 @@ async function compareSelected() {
   const base_names = [...cbs].map(cb => currentHistory[parseInt(cb.dataset.idx)].base_name);
   showCompareModal('<div style="display:flex;gap:8px;align-items:center"><div class="bulk-spinner"></div><span>正在生成对比分析...</span></div>');
   try {
-    const r = await fetch('/api/compare', {
+    const r = await authFetch('/api/compare', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ base_names }),
@@ -552,7 +679,7 @@ async function downloadSelectedPdf() {
   delBtn.disabled = true;
 
   try {
-    const r = await fetch('/api/export/batch', {
+    const r = await authFetch('/api/export/batch', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ base_names, format: 'pdf' }),
@@ -594,7 +721,7 @@ function showHistory(idx) {
   hideBar('transcribeBar');
 
   // Fetch full content
-  fetch(`/api/history/${encodeURIComponent(h.base_name)}`)
+  authFetch(`/api/history/${encodeURIComponent(h.base_name)}`)
     .then(r => { if (!r.ok) throw new Error('加载失败'); return r.json(); })
     .then(async d => {
       document.getElementById('title').textContent = d.title || h.title;
@@ -677,11 +804,11 @@ async function analyze() {
   document.getElementById('cancelBtn').style.display = 'inline-block';
 
   try {
-    const r = await fetch(`/api/analyze?url=${encodeURIComponent(url)}`, { method: 'POST' });
+    const r = await authFetch(`/api/analyze?url=${encodeURIComponent(url)}`, { method: 'POST' });
     const { task_id } = await r.json();
     currentTaskId = task_id;
 
-    const es = new EventSource(`/api/progress/${task_id}`);
+    const es = authEventSource(`/api/progress/${task_id}`);
     es.addEventListener('status', e => { document.getElementById('statusLine').textContent = e.data; });
     es.addEventListener('download', e => { updateBar('downloadBar', e.data); });
     es.addEventListener('transcribe', e => { updateBar('transcribeBar', e.data); });
@@ -734,7 +861,7 @@ async function analyze() {
 
 async function cancelTask() {
   try {
-    await fetch(`/api/cancel/${currentTaskId}`, { method: 'POST' });
+    await authFetch(`/api/cancel/${currentTaskId}`, { method: 'POST' });
   } catch(e) {}
   document.getElementById('statusLine').textContent = '已取消';
   document.getElementById('statusLine').style.color = 'var(--danger)';
@@ -756,12 +883,12 @@ async function analyzePlaylist(url) {
   document.getElementById('cancelBtn').style.display = 'inline-block';
 
   try {
-    const r = await fetch(`/api/analyze/playlist?url=${encodeURIComponent(url)}`, { method: 'POST' });
+    const r = await authFetch(`/api/analyze/playlist?url=${encodeURIComponent(url)}`, { method: 'POST' });
     if (!r.ok) throw new Error('批量解析失败');
     const { batch_id, total } = await r.json();
     document.getElementById('statusLine').textContent = `批量分析: 0/${total}`;
 
-    const es = new EventSource(`/api/progress/batch/${batch_id}`);
+    const es = authEventSource(`/api/progress/batch/${batch_id}`);
     es.addEventListener('batch_progress', e => {
       const d = JSON.parse(e.data);
       let text = `批量分析: ${d.done}/${d.total}`;
@@ -929,12 +1056,12 @@ async function ask() {
   try {
     const isGlobal = document.getElementById('globalToggle').checked;
     if (isGlobal) {
-      const r = await fetch(`/api/chat/global?q=${encodeURIComponent(q)}`);
+      const r = await authFetch(`/api/chat/global?q=${encodeURIComponent(q)}`);
       const d = await r.json();
       aiDiv.textContent = d.answer || '无法回答';
     } else {
       chatHistory.push({"role": "user", "content": q});
-      const r = await fetch("/api/chat", {
+      const r = await authFetch("/api/chat", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({
@@ -1053,6 +1180,7 @@ function pathShort(p) {
 
 // ── Init ───────────────────────────
 _applyTheme(localStorage.getItem('scan-theme') || 'auto');
+updateAuthBadge();
 loadHistory();
 </script>
 </body>
