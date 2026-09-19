@@ -17,8 +17,10 @@ is_read_allowed 返回 True 表示游客放行；返回 False 表示需管理员
 """
 import base64
 import hmac
+import os
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Callable
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -105,3 +107,42 @@ class AuthMiddleware(BaseHTTPMiddleware):
             status_code=403,
             headers={"X-Guest-Only": "1"},
         )
+
+
+def load_admin_cred(path: str | None = None) -> tuple[str, str]:
+    """从**服务器本地**凭据文件读取管理员账号与 bcrypt 哈希。
+
+    ⚠️ 哈希绝不能写进代码仓库（仓库是公开的）：bcrypt 不可逆，但可离线爆破，
+    且 hash 一旦泄漏，不轮换密码就无法撤回。
+
+    文件格式（键名支持中英文，分隔符 `:` 或 `=`）：
+        账号: scanuser           # 或 user=scanuser
+        密码: ********            # 明文仅供人读，程序不使用
+        bcrypt: $2a$14$...       # 或 hash=
+
+    路径优先级：参数 > 环境变量 `ADMIN_CRED_FILE` > `/root/.scan-web-cred`。
+    读不到哈希时返回 `(user, "")` —— 管理员登录**一律失败（fail closed）**，
+    游客只读浏览不受影响。
+    """
+    p = Path(path or os.environ.get("ADMIN_CRED_FILE", "/root/.scan-web-cred"))
+    user, admin_hash = "", ""
+    try:
+        for raw in p.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            cands = [i for i in (line.find(":"), line.find("=")) if i > 0]
+            if not cands:
+                continue
+            idx = min(cands)
+            k = line[:idx].strip().lower()
+            v = line[idx + 1:].strip()
+            if k in ("账号", "user", "username"):
+                user = v
+            elif k in ("bcrypt", "hash", "bcrypt_hash", "passhash"):
+                admin_hash = v
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    return user, admin_hash

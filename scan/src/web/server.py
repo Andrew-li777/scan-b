@@ -17,7 +17,7 @@ from src.output.markdown import _OUTPUT_DIR
 from src.rag.chat import ask as rag_ask, global_ask
 from src.web.history import router as history_router, scan_dirs
 from src.web.guest_rules import guest_read_allowed
-from src.web.auth import AuthMiddleware
+from src.web.auth import AuthMiddleware, load_admin_cred
 from src.output.html_standalone import generate_html_from_history
 from src.web.pipeline import SSE_EVENTS, cancel_task, make_task_id, push, run_pipeline, sanitize_task_id
 
@@ -26,11 +26,17 @@ batch_tracker: dict[str, dict] = {}
 
 app = FastAPI(title="Video Analyzer")
 
-# 访客模式：游客只读白名单；管理员凭据校验（bcrypt，与 Caddy basicauth 同 hash）
+_admin_user, _admin_hash = load_admin_cred()
+if not _admin_hash:
+    print("[warn] 管理员哈希未配置（/root/.scan-web-cred 缺少 bcrypt 行）"
+          "——管理功能不可用（fail closed），游客浏览不受影响")
+
+# 访客模式：游客只读白名单；管理员凭据校验（bcrypt）
 app.add_middleware(
     AuthMiddleware,
-    admin_user="scanuser",
-    admin_hash="$2a$14$RI8AXNCa1bO6/YLrAjECKOF4.UrJYs7MM7A1PATvCnaSOep5coXBi",
+    admin_user=_admin_user or "scanuser",
+    # 哈希从服务器本地凭据文件读，**绝不硬编码**（仓库是公开的，hash 泄漏只能靠轮换密码撤回）
+    admin_hash=_admin_hash,
     is_read_allowed=guest_read_allowed,
 )
 
