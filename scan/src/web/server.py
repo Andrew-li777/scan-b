@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -59,6 +59,48 @@ def vendor_mermaid():
 
 # 自托管静态资源（vendor/ 下其余文件等；游客可读——见 guest_rules 白名单）
 app.mount("/static", StaticFiles(directory=_static), name="static")
+
+
+# ── SEO / 爬虫入口（2026-09-21 补）：此前 /robots.txt、/sitemap.xml 对游客 403
+_SCAN_ORIGIN = "https://scan.andrew-li.top"
+
+
+@app.get("/robots.txt")
+def robots_txt():
+    return Response(
+        content=(
+            "User-agent: *\n"
+            "Allow: /\n"
+            "Disallow: /api/\n"
+            "\n"
+            f"Sitemap: {_SCAN_ORIGIN}/sitemap.xml\n"
+        ),
+        media_type="text/plain; charset=utf-8",
+    )
+
+
+@app.get("/sitemap.xml")
+def sitemap_xml():
+    return Response(
+        content=(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+            "  <url>\n"
+            f"    <loc>{_SCAN_ORIGIN}/</loc>\n"
+            f"    <lastmod>{date.today().isoformat()}</lastmod>\n"
+            "    <changefreq>weekly</changefreq>\n"
+            "    <priority>1.0</priority>\n"
+            "  </url>\n"
+            "</urlset>\n"
+        ),
+        media_type="application/xml; charset=utf-8",
+    )
+
+
+@app.get("/favicon.ico")
+def favicon_ico():
+    # SPA 无独立 ico；用同一枚 SVG 顶掉 404 噪音（浏览器优先读 <link rel="icon">）
+    return FileResponse(str(_static / "favicon.svg"), media_type="image/svg+xml")
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -21,8 +21,8 @@ def guest_read_allowed(method: str, path: str) -> bool:
     if p.startswith("/api/mindmap/"):
         return True
 
-    # 首页
-    if p in ("/", "/favicon.ico"):
+    # 首页 + 爬虫入口（robots/sitemap 曾被白名单漏掉 → 游客 403，爬虫吃闭门羹）
+    if p in ("/", "/favicon.ico", "/robots.txt", "/sitemap.xml"):
         return True
 
     # 自托管静态资源（vendor/mermaid.min.js 等前端库，无敏感内容）
