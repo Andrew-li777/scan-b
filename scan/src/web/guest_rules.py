@@ -25,4 +25,8 @@ def guest_read_allowed(method: str, path: str) -> bool:
     if p in ("/", "/favicon.ico"):
         return True
 
+    # 自托管静态资源（vendor/mermaid.min.js 等前端库，无敏感内容）
+    if p.startswith("/static/"):
+        return True
+
     return False

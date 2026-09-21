@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Video Analyzer</title>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<!-- mermaid@10.9.3 已自托管（/static/vendor/mermaid.min.js）并按需懒加载；
+     原先的 jsdelivr 同步外链在国内会拖死首屏（2026-09-21 移除） -->
 <style>
 /* ═══════════ 视觉 token：对齐 blog / trs 暖纸档案风 ═══════════ */
 :root{
@@ -989,25 +990,40 @@ function renderOverview(text) {
   if (!text) { el.innerHTML = '<p style="color:var(--muted)">暂未加载</p>'; return; }
   el.innerHTML = `<div class="md-rendered">${mdToHtml(text)}</div>`;
 }
+// ── Mermaid 懒加载：仅打开「思维导图」标签页时才加载（自托管，替代 jsdelivr 同步外链） ──
+let _mermaidLoading = null;
+function ensureMermaid() {
+  if (window.mermaid) return Promise.resolve(true);
+  if (!_mermaidLoading) {
+    _mermaidLoading = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = '/static/vendor/mermaid.min.js';
+      s.onload = () => resolve(true);
+      s.onerror = () => { _mermaidLoading = null; reject(new Error('mermaid 加载失败')); };
+      document.head.appendChild(s);
+    });
+  }
+  return _mermaidLoading;
+}
 async function renderMindmap(mermaidText) {
   const el = document.getElementById('tab-mindmap');
   if (!mermaidText) {
     el.innerHTML = '<p style="color:var(--muted)">暂无思维导图</p>';
     return;
   }
+  if (!window.mermaid) {
+    el.innerHTML = '<p style="color:var(--muted)">打开「思维导图」标签页时自动加载</p>';
+    return;
+  }
   el.innerHTML = '<p style="color:var(--muted)">加载思维导图...</p>';
-  if (window.mermaid) {
-    try {
-      const scheme = document.documentElement.getAttribute('data-theme');
-      const isDark = scheme === 'dark' || (scheme !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-      mermaid.initialize({ startOnLoad: false, theme: isDark ? 'dark' : 'neutral' });
-      const { svg } = await mermaid.render('mindmap_' + Date.now(), mermaidText);
-      el.innerHTML = '<div class="mindmap-box">' + svg + '</div>';
-    } catch (e) {
-      console.error('Mindmap render failed:', e);
-      el.innerHTML = '<pre class="mindmap-box">' + esc(mermaidText) + '</pre>';
-    }
-  } else {
+  try {
+    const scheme = document.documentElement.getAttribute('data-theme');
+    const isDark = scheme === 'dark' || (scheme !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    mermaid.initialize({ startOnLoad: false, theme: isDark ? 'dark' : 'neutral' });
+    const { svg } = await mermaid.render('mindmap_' + Date.now(), mermaidText);
+    el.innerHTML = '<div class="mindmap-box">' + svg + '</div>';
+  } catch (e) {
+    console.error('Mindmap render failed:', e);
     el.innerHTML = '<pre class="mindmap-box">' + esc(mermaidText) + '</pre>';
   }
 }
@@ -1035,6 +1051,13 @@ function switchTab(name) {
   if (idx >= 0) {
     document.querySelectorAll('.tab-btn')[idx].classList.add('active');
     document.getElementById(`tab-${name}`).classList.add('active');
+  }
+  // 思维导图懒加载：首次打开该标签页时才拉取 mermaid（~0.9MB 压缩）
+  if (name === 'mindmap' && currentMindmap && !window.mermaid) {
+    ensureMermaid().then(() => renderMindmap(currentMindmap)).catch(() => {
+      document.getElementById('tab-mindmap').innerHTML =
+        '<p style="color:var(--muted)">思维导图组件加载失败，请刷新重试</p>';
+    });
   }
 }
 

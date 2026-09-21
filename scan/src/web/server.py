@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from src.cache import cache
@@ -41,6 +42,23 @@ app.add_middleware(
 )
 
 _static = Path(__file__).parent / "static"
+
+
+# mermaid 预压缩分发：回源拉取 0.9MB(gz) 而非 3.3MB —— 1Mbps 出网下 ~8s vs ~30s
+@app.get("/static/vendor/mermaid.min.js")
+def vendor_mermaid():
+    gz = _static / "vendor" / "mermaid.min.js.gz"
+    raw = _static / "vendor" / "mermaid.min.js"
+    if gz.is_file():
+        return FileResponse(gz, media_type="text/javascript",
+                            headers={"Content-Encoding": "gzip",
+                                     "Cache-Control": "public, max-age=86400"})
+    return FileResponse(raw, media_type="text/javascript",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+# 自托管静态资源（vendor/ 下其余文件等；游客可读——见 guest_rules 白名单）
+app.mount("/static", StaticFiles(directory=_static), name="static")
 
 
 @app.get("/", response_class=HTMLResponse)
