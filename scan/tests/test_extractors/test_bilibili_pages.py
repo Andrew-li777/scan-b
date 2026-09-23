@@ -82,7 +82,7 @@ class TestExtractPage:
             meta = BilibiliExtractor().extract(
                 "https://www.bilibili.com/video/BV1xx/?p=3")
         assert meta.duration == 300          # P3 时长，而非 600 总时长
-        assert "（P3）" in meta.title          # 标题后缀，输出目录唯一
+        assert meta.title.startswith("[P3] ")  # 前缀标记，截断后仍唯一
 
     def test_extract_default_is_p1(self):
         pages = [{"cid": 10, "duration": 100}, {"cid": 20, "duration": 200}]
@@ -113,7 +113,7 @@ class TestExtractPage:
             meta = BilibiliExtractor().extract(
                 "https://www.bilibili.com/video/BV1xx/?p=1")
         assert meta.duration == 100
-        assert "（P1）" in meta.title
+        assert meta.title.startswith("[P1] ")
 
 
 class TestExpandPlaylistWiring:

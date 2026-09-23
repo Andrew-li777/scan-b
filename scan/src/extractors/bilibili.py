@@ -270,8 +270,10 @@ class BilibiliExtractor(BaseExtractor):
             duration = int(pages[page - 1].get("duration", duration) or duration)
         title = str(info.get("title", "") or "")
         if re.search(r"[?&]p=\d+", url):
-            # 显式带 ?p= 的请求统一加（P{n}）后缀（含 P1）：批量任务输出目录互不覆盖
-            title = f"{title}（P{page}）"
+            # 显式带 ?p= 的请求统一加前缀标记（含 P1）：pipeline 会按标题前 60 字符
+            # 截断生成输出目录（src/web/pipeline.py base_name[:60]），标记放**开头**
+            # 才不会被截掉 —— 否则 7 个 P 全部塌缩进同一目录互相覆盖
+            title = f"[P{page}] {title}"
         return VideoMeta(
             platform="bilibili",
             video_id=bvid,
