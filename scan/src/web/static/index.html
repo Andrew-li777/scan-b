@@ -271,6 +271,7 @@ a{color:inherit;text-decoration:none}
   <div class="input-box">
     <input type="text" id="urlInput" placeholder="粘贴 YouTube 或 Bilibili 视频 URL..." />
     <button id="analyzeBtn" onclick="analyze()">解析</button>
+    <button id="batchBtn" onclick="batchAnalyze()" style="margin-left:6px" title="批量解析：YouTube 播放列表 / B站合集 / 分P 视频（按 ?p 逐个串行）">批量解析</button>
   </div>
   <div id="progress">
     <div id="statusLine">就绪</div>
@@ -806,8 +807,9 @@ async function analyze() {
   if(!requireLogin()) return;
   const url = document.getElementById('urlInput').value.trim();
   if (!url) return;
-  // Detect playlist/collection URL (YouTube or Bilibili)
-  if (url.includes('playlist?list=') || /space\.bilibili\.com\/\d+\/lists\//.test(url)) {
+  // Detect playlist/collection URL (YouTube playlist, Bilibili 合集新旧格式)
+  if (url.includes('playlist?list=') || /space\.bilibili\.com\/\d+\/lists\//.test(url)
+      || /bilibili\.com\/list\/\d+\//.test(url)) {
     return analyzePlaylist(url);
   }
   const btn = document.getElementById('analyzeBtn');
@@ -876,6 +878,13 @@ async function analyze() {
     err.style.display = 'block';
     btn.disabled = false;
   }
+}
+
+async function batchAnalyze() {
+  if(!requireLogin()) return;
+  const url = document.getElementById('urlInput').value.trim();
+  if (!url) return;
+  return analyzePlaylist(url);
 }
 
 async function cancelTask() {
