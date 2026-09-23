@@ -255,7 +255,12 @@ class BilibiliExtractor(BaseExtractor):
         bvid = self._parse_bvid(url)
         page = self._parse_page(url)
         info = self._fetch_info(bvid, page=page)
-        cid = info.get("cid", 0)
+        # 分P：cid 必须从 pages[page-1] 取 —— view 接口顶层 cid 永远是 P1 的
+        # （带 p 参数也不变），直接取顶层 cid 会让字幕/音频全串成 P1。
+        pages = info.get("pages") or []
+        cid = int(info.get("cid", 0) or 0)
+        if pages and 1 <= page <= len(pages):
+            cid = int(pages[page - 1].get("cid", cid) or cid)
         self.last_subtitle_source = ""
         subs = []
         try:

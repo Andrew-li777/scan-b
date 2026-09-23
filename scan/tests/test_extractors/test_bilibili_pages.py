@@ -84,6 +84,35 @@ class TestExtractPage:
         assert meta.duration == 300          # P3 时长，而非 600 总时长
         assert meta.title.startswith("[P3] ")  # 前缀标记，截断后仍唯一
 
+    def test_extract_p3_cid_from_pages(self):
+        """cid 必须取 pages[p-1]（view 顶层 cid 永远是 P1）——回归：分P 字幕/音频曾全串成 P1。"""
+        pages = [
+            {"cid": 10, "duration": 100},
+            {"cid": 20, "duration": 200},
+            {"cid": 30, "duration": 300},
+        ]
+        info = {"cid": 10, "aid": 1, "title": "视频标题", "duration": 600,
+                "pages": pages, "owner": {"name": "UP"}, "pic": ""}
+
+        def _fake_get(url, params=None, max_retries=3):
+            if "web-interface/view" in url:
+                return _view(info)
+            return _NO_SUBS
+
+        seen_cids = []
+
+        def _fake_sub(url, params=None, max_retries=3):
+            # 记录传给字幕接口的 cid
+            seen_cids.append(params.get("cid") if params else None)
+            return []
+
+        with patch("src.extractors.bilibili._retry_get", side_effect=_fake_get):
+            with patch("src.extractors.bilibili.BilibiliExtractor._list_subtitles",
+                       side_effect=_fake_sub):
+                BilibiliExtractor().extract(
+                    "https://www.bilibili.com/video/BV1xx/?p=3")
+        assert seen_cids and seen_cids[0] == 30  # 字幕必须用 P3 的 cid，而非顶层 P1 的 10
+
     def test_extract_default_is_p1(self):
         pages = [{"cid": 10, "duration": 100}, {"cid": 20, "duration": 200}]
         info = {"cid": 10, "aid": 1, "title": "视频标题", "duration": 300,

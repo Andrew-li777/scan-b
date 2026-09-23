@@ -204,8 +204,13 @@ def _download_bilibili_audio(url: str, tmpdir: Path, progress_cb=None) -> Path:
 
     ex = BilibiliExtractor()
     bvid = ex._parse_bvid(url)
-    info = ex._fetch_info(bvid)
-    cid = info.get("cid", 0)
+    page = ex._parse_page(url)
+    info = ex._fetch_info(bvid, page=page)
+    # 分P：cid 必须从 pages[page-1] 取（view 顶层 cid 永远是 P1）
+    pages = info.get("pages") or []
+    cid = int(info.get("cid", 0) or 0)
+    if pages and 1 <= page <= len(pages):
+        cid = int(pages[page - 1].get("cid", cid) or cid)
 
     result = fetch_bilibili_audio_url(bvid, cid)
     if not result:
