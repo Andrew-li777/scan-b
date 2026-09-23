@@ -15,8 +15,11 @@ from src.models import SubtitleEntry, VideoMeta
 _BILI_URL_PATTERN = re.compile(
     r"(?:https?://)?(?:www\.)?bilibili\.com/video/(BV[\w]+)"
 )
+# 合集/收藏夹列表页：旧格式 space.bilibili.com/<uid>/lists/<sid>，
+# 新格式 bilibili.com/list/<uid>/?sid=<sid>（B站迁移后的链接形态）
 _BILI_COLLECTION_URL_PATTERN = re.compile(
-    r"(?:https?://)?space\.bilibili\.com/(\d+)/lists/(\d+)"
+    r"(?:https?://)?(?:www\.)?bilibili\.com/list/\d+/?(?:\?[^#]*)?(?:[?&]sid=\d+)"
+    r"|(?:https?://)?space\.bilibili\.com/\d+/lists/\d+"
 )
 
 _BILI_API_INFO = "https://api.bilibili.com/x/web-interface/view"
@@ -24,6 +27,7 @@ _BILI_API_PLAYER = "https://api.bilibili.com/x/player/v2"
 _BILI_API_PLAYER_WBI = "https://api.bilibili.com/x/player/wbi/v2"
 _BILI_API_NAV = "https://api.bilibili.com/x/web-interface/nav"
 _BILI_API_PLAYURL = "https://api.bilibili.com/x/player/playurl"
+_BILI_API_PAGELIST = "https://api.bilibili.com/x/player/pagelist"
 
 _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -41,8 +45,20 @@ _BASE_HEADERS = {
 
 
 def _load_cookie_str() -> str:
-    """Load Bilibili cookies from Netscape-format file (BILIBILI_COOKIES env var)."""
+    """Load Bilibili cookies from Netscape-format file (BILIBILI_COOKIES env var).
+
+    优先取 os.environ；systemd 服务未注入 .env 时，兜底直接从项目 .env 读路径。
+    """
     cookie_path = os.environ.get("BILIBILI_COOKIES", "")
+    if not cookie_path:
+        try:
+            _envp = Path(__file__).resolve().parent.parent.parent / ".env"
+            for _line in _envp.read_text(encoding="utf-8").splitlines():
+                if _line.startswith("BILIBILI_COOKIES="):
+                    cookie_path = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+        except Exception:
+            return ""
     if not cookie_path:
         return ""
     try:
@@ -177,7 +193,10 @@ def expand_collection(url: str) -> tuple[list[str], str]:
         return [], ""
 
     import yt_dlp as _yt_dlp
-    opts = {"quiet": True, "extract_flat": True}
+    opts: dict = {"quiet": True, "extract_flat": True}
+    if _COOKIE_STR:
+        # 合集页在无登录态下常被 412 风控拦（实测旧格式 URL）；带 cookie 后改走 API 可展开
+        opts["http_headers"] = {"Cookie": _COOKIE_STR, "User-Agent": _USER_AGENTS[0]}
     try:
         with _yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -192,6 +211,40 @@ def expand_collection(url: str) -> tuple[list[str], str]:
         return [], ""
 
 
+def expand_pages(url: str) -> tuple[list[str], str]:
+    """展开 B站分P 视频（一个 BV 内的多个分节）为 N 个 ?p=N 链接。
+
+    - 单 P（普通视频）：返回空 —— 不劫持常规单视频解析路径
+    - 多 P：返回 [`https://www.bilibili.com/video/{BV}?p=1..N`] + 作者名
+    数据源：x/player/pagelist（免登录可读，已实测 200）
+    """
+    m = _BILI_URL_PATTERN.search(url)
+    if not m:
+        return [], ""
+    bvid = m.group(1)
+    try:
+        r = _retry_get(_BILI_API_PAGELIST, params={"bvid": bvid})
+        data = r.json()
+        if data.get("code") != 0:
+            return [], ""
+        pages = data.get("data") or []
+        if len(pages) <= 1:
+            return [], ""
+        urls = [
+            f"https://www.bilibili.com/video/{bvid}?p={i}"
+            for i in range(1, len(pages) + 1)
+        ]
+        author = ""
+        try:
+            info = _retry_get(_BILI_API_INFO, params={"bvid": bvid}).json().get("data") or {}
+            author = (info.get("owner") or {}).get("name", "")
+        except Exception:
+            pass
+        return urls, author
+    except Exception:
+        return [], ""
+
+
 class BilibiliExtractor(BaseExtractor):
     platform = "bilibili"
 
@@ -200,7 +253,8 @@ class BilibiliExtractor(BaseExtractor):
 
     def extract(self, url: str) -> VideoMeta:
         bvid = self._parse_bvid(url)
-        info = self._fetch_info(bvid)
+        page = self._parse_page(url)
+        info = self._fetch_info(bvid, page=page)
         cid = info.get("cid", 0)
         self.last_subtitle_source = ""
         subs = []
@@ -208,12 +262,21 @@ class BilibiliExtractor(BaseExtractor):
             subs = self._fetch_subtitles(bvid, cid, aid=info.get("aid"))
         except RuntimeError:
             pass  # 无字幕，server.py 会走 Whisper 回退
+
+        # 分P：duration 以对应 P 为准（view 顶层 duration 是所有 P 的总和，会误导分块/超时）
+        pages = info.get("pages") or []
+        duration = int(info.get("duration", 0) or 0)
+        if pages and 1 <= page <= len(pages):
+            duration = int(pages[page - 1].get("duration", duration) or duration)
+        title = str(info.get("title", "") or "")
+        if page > 1:
+            title = f"{title}（P{page}）"
         return VideoMeta(
             platform="bilibili",
             video_id=bvid,
-            title=info.get("title", ""),
+            title=title,
             url=clean_url(url),
-            duration=int(info.get("duration", 0) or 0),
+            duration=duration,
             author=info.get("owner", {}).get("name", ""),
             thumbnail=info.get("pic", ""),
             subtitles=subs,
@@ -226,8 +289,15 @@ class BilibiliExtractor(BaseExtractor):
             raise ValueError(f"无法解析 Bilibili URL: {url}")
         return m.group(1)
 
-    def _fetch_info(self, bvid: str) -> dict:
-        r = _retry_get(_BILI_API_INFO, params={"bvid": bvid})
+    @staticmethod
+    def _parse_page(url: str) -> int:
+        """从 URL 取分P 序号（?p=N），缺省 1。"""
+        m = re.search(r"[?&]p=(\d+)", url)
+        return max(1, int(m.group(1))) if m else 1
+
+    def _fetch_info(self, bvid: str, page: int = 1) -> dict:
+        # p 参数让 view 接口返回对应分P 的 cid（默认 1 = 第一 P）
+        r = _retry_get(_BILI_API_INFO, params={"bvid": bvid, "p": page})
         data = r.json()
         if data.get("code") != 0:
             raise RuntimeError(

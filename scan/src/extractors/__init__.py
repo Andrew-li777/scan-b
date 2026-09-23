@@ -1,5 +1,5 @@
 from src.extractors.base import BaseExtractor
-from src.extractors.bilibili import BilibiliExtractor, expand_collection
+from src.extractors.bilibili import BilibiliExtractor, expand_collection, expand_pages
 from src.extractors.youtube import YouTubeExtractor, extract_playlist_urls
 
 _extractors: list[BaseExtractor] = [YouTubeExtractor(), BilibiliExtractor()]
@@ -14,7 +14,8 @@ def get_extractor(url: str) -> BaseExtractor:
 
 def expand_playlist(url: str) -> tuple[list[str], str]:
     """Expand a playlist/collection URL into (video_urls, author_name).
-    Supports YouTube playlists and Bilibili collections.
+    Supports YouTube playlists, Bilibili collections (新旧格式), and
+    Bilibili multi-P (分P) videos.
     """
     # Try YouTube playlist
     urls = extract_playlist_urls(url)
@@ -22,4 +23,9 @@ def expand_playlist(url: str) -> tuple[list[str], str]:
         return urls, ""
 
     # Try Bilibili collection (yt-dlp BilibiliCollectionList)
-    return expand_collection(url)
+    urls, author = expand_collection(url)
+    if urls:
+        return urls, author
+
+    # Try Bilibili multi-P (分P) video → N 个 ?p=N 链接
+    return expand_pages(url)
