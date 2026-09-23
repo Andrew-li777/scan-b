@@ -269,7 +269,8 @@ class BilibiliExtractor(BaseExtractor):
         if pages and 1 <= page <= len(pages):
             duration = int(pages[page - 1].get("duration", duration) or duration)
         title = str(info.get("title", "") or "")
-        if page > 1:
+        if re.search(r"[?&]p=\d+", url):
+            # 显式带 ?p= 的请求统一加（P{n}）后缀（含 P1）：批量任务输出目录互不覆盖
             title = f"{title}（P{page}）"
         return VideoMeta(
             platform="bilibili",

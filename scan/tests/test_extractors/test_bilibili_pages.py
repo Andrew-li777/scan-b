@@ -99,6 +99,22 @@ class TestExtractPage:
         assert meta.duration == 100
         assert "（P" not in meta.title
 
+    def test_extract_explicit_p1_gets_suffix(self):
+        pages = [{"cid": 10, "duration": 100}, {"cid": 20, "duration": 200}]
+        info = {"cid": 10, "aid": 1, "title": "视频标题", "duration": 300,
+                "pages": pages, "owner": {"name": "UP"}, "pic": ""}
+
+        def _fake_get(url, params=None, max_retries=3):
+            if "web-interface/view" in url:
+                return _view(info)
+            return _NO_SUBS
+
+        with patch("src.extractors.bilibili._retry_get", side_effect=_fake_get):
+            meta = BilibiliExtractor().extract(
+                "https://www.bilibili.com/video/BV1xx/?p=1")
+        assert meta.duration == 100
+        assert "（P1）" in meta.title
+
 
 class TestExpandPlaylistWiring:
     def test_collection_wins_before_pages(self):
