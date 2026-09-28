@@ -161,7 +161,10 @@ async def analyze_playlist(url: str = Query(...)):
             author = ""
     else:
         author = re.sub(r"[\\/:*?\"<>|' ]", "_", author)[:30]
-    parent_dir = f"{author}_{date.today()}" if author else ""
+    # 分P 批量（URL 含 ?p=）默认平铺到 records 根（每条 P 是独立记录，侧栏可见）；
+    # 合集/播放列表才用 author_日期 父目录归组。
+    is_pages_batch = bool(urls) and all("?p=" in u for u in urls)
+    parent_dir = "" if is_pages_batch else (f"{author}_{date.today()}" if author else "")
 
     async def _run_serial():
         for i, video_url in enumerate(urls):

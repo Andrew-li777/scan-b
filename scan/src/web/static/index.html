@@ -490,7 +490,7 @@ async function loadHistory() {
       const p = h.path || '未知';
       if (!pathGroups[p]) pathGroups[p] = { items: [], subs: {} };
       const bn = h.base_name || '';
-      const slash = bn.indexOf('\\');
+      const slash = bn.indexOf('/');  // base_name 是 POSIX 相对路径（正斜杠），如 生信学不会1_2026-09-23/[P1]_…
       if (slash > 0) {
         const sub = bn.substring(0, slash);
         if (!pathGroups[p].subs[sub]) pathGroups[p].subs[sub] = [];
