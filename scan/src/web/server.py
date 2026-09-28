@@ -166,12 +166,16 @@ async def analyze_playlist(url: str = Query(...)):
     async def _run_serial():
         for i, video_url in enumerate(urls):
             tid = make_task_id()
-            batch_tracker[batch_id]["tasks"].append({"url": video_url, "task_id": tid, "status": "running"})
+            tr = batch_tracker.get(batch_id)
+            if tr is None:  # 防御：记录意外丢失时仍继续跑任务（不阻塞批量本身）
+                tr = {"total": len(urls), "done": 0, "failed": 0, "tasks": []}
+                batch_tracker[batch_id] = tr
+            tr["tasks"].append({"url": video_url, "task_id": tid, "status": "running"})
             SSE_EVENTS[tid] = queue.Queue()
             push(f"batch_{batch_id}", "batch_progress", json.dumps({
-                "done": batch_tracker[batch_id]["done"],
+                "done": tr["done"],
                 "total": len(urls),
-                "failed": batch_tracker[batch_id]["failed"],
+                "failed": tr["failed"],
                 "task_id": tid, "video": video_url.rsplit("/", 1)[-1][:40],
             }))
             try:
@@ -193,6 +197,8 @@ async def analyze_playlist(url: str = Query(...)):
                 "total": len(urls),
                 "failed": batch_tracker[batch_id]["failed"],
             }))
+        # 批量线程收尾：清理 tracker，避免内存泄漏（原由 SSE finally pop，已改为线程负责）
+        batch_tracker.pop(batch_id, None)
 
     threading.Thread(target=asyncio.run, args=(_run_serial(),), daemon=True).start()
     return {"batch_id": batch_id, "total": len(urls)}
@@ -216,8 +222,10 @@ async def batch_progress(batch_id: str):
                 except queue.Empty:
                     break
         finally:
+            # 只清理 SSE 事件队列；batch_tracker 归后台线程 _run_serial 管理，
+            # 若在此 pop，前端断开进度流会清掉仍在运行批次的记录 →
+            # _run_serial 下一轮 batch_tracker[batch_id] 直接 KeyError 崩溃（实测只剩 P1）。
             SSE_EVENTS.pop(event_id, None)
-            batch_tracker.pop(batch_id, None)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
