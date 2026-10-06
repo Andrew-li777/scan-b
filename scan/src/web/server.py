@@ -105,7 +105,12 @@ def favicon_ico():
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return (_static / "index.html").read_text(encoding="utf-8")
+    # 每次从磁盘读（改动免重启）；no-cache 确保浏览器不会拿启发式缓存里的旧页面
+    # —— 否则前端改了按钮，用户刷新后仍看到旧 UI，误判「没生效」
+    return HTMLResponse(
+        (_static / "index.html").read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
 
 
 @app.get("/api/progress/{task_id}")
