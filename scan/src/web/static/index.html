@@ -1049,21 +1049,77 @@ async function renderMindmap(mermaidText) {
     el.innerHTML = '<pre class="mindmap-box">' + esc(mermaidText) + '</pre>';
   }
 }
+/* ⚠️ 下载/导出必须走带 Authorization 的 fetch，**不能**用 <a href> / window.location：
+   登录凭据存在 localStorage，浏览器只在 JS fetch 时附带；<a href> 这类顶层导航不带任何凭据，
+   后端中间件按“游客”处理 → guest_rules 明确拒绝 /api/download/、/api/export/ → 403
+   （所以「登录了却下不了」不是登录失败，而是凭据没被送到请求上）。
+   与批量导出('/api/export/batch')、translate-web 的 dlFmt() 完全同构。 */
+async function downloadViaFetch(url, filename, btn) {
+  if (!requireLogin()) return;                      // 游客 → 弹登录框（同原 guard 行为）
+  const old = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = '生成中…'; }
+  try {
+    const r = await authFetch(url);                 // 401/403 由 authFetch 弹登录框
+    if (!r.ok) {
+      if (r.status === 401 || r.status === 403) return;
+      let msg = `HTTP ${r.status}`;
+      try { msg = (await r.json()).detail || msg; } catch (_) {}
+      alert('下载失败：' + msg);
+      return;
+    }
+    // 文件名优先取后端 Content-Disposition（同源，响应头可直接读）
+    const cd = r.headers.get('Content-Disposition') || '';
+    const m = /filename\*=UTF-8''([^;]+)/i.exec(cd) || /filename="([^"]+)"/i.exec(cd);
+    if (m) { try { filename = decodeURIComponent(m[1]); } catch (_) { filename = m[1]; } }
+    const blob = await r.blob();
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = href; a.download = filename || 'download';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 4000);
+  } catch (e) {
+    alert('下载失败：' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+function _dlButton(label, url, filename, cls) {
+  // 用 DOM 事件而非拼接 href 字符串：既带上凭据，也免掉路径里引号/特殊字符的注入风险
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = cls || '';
+  b.textContent = label;
+  if (!isAdmin()) b.title = '需登录后下载';
+  b.onclick = () => downloadViaFetch(url, filename, b);
+  return b;
+}
+function _printButton() {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'export-btn';
+  b.textContent = '📄 打印 PDF';
+  b.title = '浏览器打印对话框，可自选边距/页眉页脚';
+  b.onclick = () => window.print();   // 本地打印不需要凭据
+  return b;
+}
 function renderDownloads(files, baseName) {
   const el = document.getElementById('downloads');
   const labels = { subtitles: '完整字幕', overview: '内容概览', keypoints: '重点标示', mindmap: '思维导图', srt: 'SRT 字幕' };
-  // 游客（未登录）点击下载/导出 → 弹登录框，避免裸 403
-  const guard = isAdmin() ? '' : ' onclick="openLoginModal();return false;" title="需登录后下载"';
-  const downloads = Object.entries(files).map(([k, v]) => {
+  el.innerHTML = '';
+  for (const [k, v] of Object.entries(files)) {
     const ext = k === 'srt' ? '' : ' (.md)';
-    return `<a href="/api/download/${encodeURIComponent(v)}" download${guard}>${labels[k] || k}${ext}</a>`;
-  }).join('');
-  const exports = baseName
-    ? `<button class="export-btn" onclick="window.print()" title="浏览器打印对话框，可自选边距/页眉页脚">📄 打印 PDF</button>
-       <a class="export-btn" href="/api/export/${encodeURIComponent(baseName)}?format=pdf"${guard} title="后端直接生成 PDF（无对话框）">📕 下载 PDF</a>
-       <a class="export-btn" href="/api/export/${encodeURIComponent(baseName)}?format=html"${guard}>📦 导出 HTML</a>`
-    : `<button class="export-btn" onclick="window.print()">📄 打印 PDF</button>`;
-  el.innerHTML = downloads + exports;
+    const fn = String(v).split('/').pop();
+    el.appendChild(_dlButton((labels[k] || k) + ext,
+                             '/api/download/' + encodeURIComponent(v), fn));
+  }
+  el.appendChild(_printButton());
+  if (baseName) {
+    const stem = String(baseName).split('/').pop();
+    el.appendChild(_dlButton('📕 下载 PDF',
+                             `/api/export/${encodeURIComponent(baseName)}?format=pdf`, stem + '.pdf', 'export-btn'));
+    el.appendChild(_dlButton('📦 导出 HTML',
+                             `/api/export/${encodeURIComponent(baseName)}?format=html`, stem + '.html', 'export-btn'));
+  }
 }
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
