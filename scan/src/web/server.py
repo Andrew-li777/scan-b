@@ -283,7 +283,9 @@ def get_mindmap(base_name: str):
 
 class BatchExportRequest(BaseModel):
     base_names: list[str]
-    format: str = "pdf"
+    # "html" = 零依赖（复用 generate_html_from_history），默认；
+    # "pdf" = 需要本机有 weasyprint 或 chrome，否则每条都会进 _failed.json
+    format: str = "html"
 
 
 @app.post("/api/export/batch")
@@ -295,9 +297,10 @@ def export_batch(req: BatchExportRequest):
         raise HTTPException(400, "未选择记录")
     if len(req.base_names) > 50:
         raise HTTPException(400, "单次最多 50 条")
-    if req.format != "pdf":
-        raise HTTPException(400, f"暂只支持 pdf 格式，收到: {req.format}")
+    if req.format not in ("html", "pdf"):
+        raise HTTPException(400, f"不支持的导出格式: {req.format}（可选 html / pdf）")
 
+    # 无条件导入：pdf.py 顶层不 import weasyprint/chrome，只有真正渲染时才去找引擎
     from src.output.pdf import generate_pdf_from_history
 
     used: set[str] = set()
@@ -306,27 +309,34 @@ def export_batch(req: BatchExportRequest):
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for bn in req.base_names:
             try:
-                pdf_bytes = generate_pdf_from_history(bn, backend=settings.pdf_backend)
-                if pdf_bytes is None:
-                    failed.append({"base_name": bn, "error": "记录不存在"})
-                    continue
-                # Unique filename: last segment of base_name + .pdf, with _1/_2 suffix on collision
+                if req.format == "html":
+                    html = generate_html_from_history(bn)
+                    if html is None:
+                        failed.append({"base_name": bn, "error": "记录不存在"})
+                        continue
+                    payload = html.encode("utf-8") if isinstance(html, str) else html
+                else:
+                    payload = generate_pdf_from_history(bn, backend=settings.pdf_backend)
+                    if payload is None:
+                        failed.append({"base_name": bn, "error": "记录不存在"})
+                        continue
+                # Unique filename: last segment of base_name + ext, with _1/_2 suffix on collision
                 stem = bn.replace("\\", "/").rsplit("/", 1)[-1]
                 stem = re.sub(r"[\\/:*?\"<>|]", "_", stem)[:80] or "video"
-                name = f"{stem}.pdf"
+                name = f"{stem}.{req.format}"
                 i = 1
                 while name in used:
-                    name = f"{stem}_{i}.pdf"
+                    name = f"{stem}_{i}.{req.format}"
                     i += 1
                 used.add(name)
-                zf.writestr(name, pdf_bytes)
+                zf.writestr(name, payload)
             except Exception as e:
                 failed.append({"base_name": bn, "error": str(e)})
         if failed:
             zf.writestr("_failed.json", json.dumps(failed, ensure_ascii=False, indent=2))
 
     buf.seek(0)
-    fname = f"videos_{len(req.base_names)}.zip"
+    fname = f"videos_{len(req.base_names)}_{req.format}.zip"
     return Response(
         content=buf.getvalue(),
         media_type="application/zip",

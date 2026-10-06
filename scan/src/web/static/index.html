@@ -241,7 +241,7 @@ a{color:inherit;text-decoration:none}
   <div id="historyList"><div class="empty-history">暂无记录</div></div>
   <div id="historyActions" style="display:none;padding-top:8px;border-top:1px solid var(--border);margin-top:8px">
     <button class="bulk-btn bulk-compare" onclick="compareSelected()">🔍 对比选中</button>
-    <button class="bulk-btn bulk-pdf" onclick="downloadSelectedPdf()">📕 打包下载 PDF</button>
+    <button class="bulk-btn bulk-pdf" onclick="downloadSelectedZip()">📦 打包下载 HTML</button>
     <button class="bulk-btn bulk-del" onclick="deleteSelected()">🗑 删除选中</button>
     <div id="bulkProgress" style="display:none"></div>
   </div>
@@ -605,7 +605,7 @@ function updateBulkBtns() {
     pdfBtn.disabled = n === 0 || n > 50;
     pdfBtn.title = n > 50 ? '单次最多 50 条，请减少选择'
                    : n === 0 ? '请先勾选记录'
-                   : `打包 ${n} 个视频为 ZIP`;
+                   : `打包 ${n} 个视频为 HTML ZIP`;
   }
 }
 // Back-compat shim (older inline handlers still call updateDelBtn)
@@ -682,7 +682,9 @@ async function compareSelected() {
   }
 }
 
-async function downloadSelectedPdf() {
+// 打包导出：后端 PDF 引擎不可用时曾静默产出只含 _failed.json 的 zip，
+// 现改为**HTML**（zip 内每个记录一个 .html，零依赖、单条可单独重试）。
+async function downloadSelectedZip() {
   if(!requireLogin()) return;
   const cbs = document.querySelectorAll('.hi-cb:checked');
   if (!cbs.length) return;
@@ -691,7 +693,7 @@ async function downloadSelectedPdf() {
 
   const prog = document.getElementById('bulkProgress');
   prog.style.display = 'flex';
-  prog.innerHTML = `<div class="bulk-spinner"></div><span>正在生成 ${base_names.length} 个 PDF（每条约 5–15 秒）...</span>`;
+  prog.innerHTML = `<div class="bulk-spinner"></div><span>正在打包 ${base_names.length} 个 HTML...</span>`;
   const pdfBtn = document.querySelector('.bulk-pdf');
   const delBtn = document.querySelector('.bulk-del');
   pdfBtn.disabled = true;
@@ -701,7 +703,7 @@ async function downloadSelectedPdf() {
     const r = await authFetch('/api/export/batch', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ base_names, format: 'pdf' }),
+      body: JSON.stringify({ base_names, format: 'html' }),
     });
     if (!r.ok) {
       let msg = `HTTP ${r.status}`;
@@ -712,18 +714,20 @@ async function downloadSelectedPdf() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `videos_${base_names.length}.zip`;
+    a.download = `videos_${base_names.length}_html.zip`;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
-    prog.innerHTML = `<span style="color:var(--success)">✓ 下载完成（${(blob.size/1024/1024).toFixed(1)} MB），如含 _failed.json 表示有失败条目</span>`;
+    prog.innerHTML = `<span style="color:var(--success)">✓ 下载完成（${(blob.size/1024).toFixed(0)} KB），如含 _failed.json 表示有失败条目</span>`;
     setTimeout(() => { prog.style.display = 'none'; prog.innerHTML = ''; }, 8000);
   } catch (e) {
     prog.innerHTML = `<span style="color:var(--danger)">✗ 失败: ${esc(e.message)}</span>`;
   } finally {
     delBtn.disabled = false;
-    updateBulkBtns();  // re-enable PDF btn based on selection count
+    updateBulkBtns();  // re-enable zip btn based on selection count
   }
 }
+// Back-compat shim：旧的 inline handler / 缓存页面可能还在调这个老名字
+function downloadSelectedPdf() { return downloadSelectedZip(); }
 
 function showHistory(idx) {
   const h = currentHistory[idx];
@@ -1114,9 +1118,9 @@ function renderDownloads(files, baseName) {
   }
   el.appendChild(_printButton());
   if (baseName) {
+    // 注意：「📕 下载 PDF」按钮已移除 —— 后端 PDF 引擎（weasyprint/chrome）在本机不可用，
+    // GET /api/export?format=pdf 恒 500。需要 PDF 请用「📄 打印 PDF」（浏览器打印对话框 → 另存为 PDF）。
     const stem = String(baseName).split('/').pop();
-    el.appendChild(_dlButton('📕 下载 PDF',
-                             `/api/export/${encodeURIComponent(baseName)}?format=pdf`, stem + '.pdf', 'export-btn'));
     el.appendChild(_dlButton('📦 导出 HTML',
                              `/api/export/${encodeURIComponent(baseName)}?format=html`, stem + '.html', 'export-btn'));
   }
