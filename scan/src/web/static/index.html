@@ -754,6 +754,11 @@ function showHistory(idx) {
       else document.getElementById('thumb').src = '';
       currentVideoUrl = d.url || '';
       currentPlatform = d.platform || '';
+      /* RAG 问答的集合名必须由「记录本身」派生（见 src/rag/ids.py）。
+         旧代码只在当场解析时才赋 currentTaskId，打开历史记录后它一直是 null →
+         请求带 task_id:null → 后端 422 → 前端显示"请求失败"。这是"历史记录问不了"的根因。 */
+      currentTaskId = (d.rag && d.rag.task_id) || '';
+      updateChatHint();
 
       // Parse summary line from overview (skip frontmatter and markdown noise)
       document.getElementById('summaryLine').textContent = extractFirstSentence(d.overview) || '无摘要';
@@ -850,6 +855,10 @@ async function analyze() {
       currentVideoUrl = d.url || '';
       currentPlatform = d.platform || '';
       chatHistory = [];
+      /* 单条解析时 task_id 本身通常就是 BV 号；批量/分P 解析给的是随机 UUID，
+         done 事件若带了记录级 rag id（由 URL 派生），优先采用它，保证与补索引同名。 */
+      currentTaskId = (d.rag && d.rag.task_id) || currentTaskId;
+      updateChatHint();
       const isTranslated = d.translated || false;
       renderKeypoints(d.keypoints, isTranslated);
       renderSubtitles(currentSubtitles, isTranslated);
@@ -1150,7 +1159,8 @@ function updateChatHint() {
   const isGlobal = document.getElementById('globalToggle').checked;
   document.getElementById('chatInput').placeholder = isGlobal
     ? '向所有已分析视频提问...'
-    : '问一个关于视频内容的问题...';
+    : (currentTaskId ? '问一个关于视频内容的问题...'
+                     : '（本记录缺少检索标识 —— 勾选"搜索所有视频"仍可提问）');
 }
 
 async function ask() {
@@ -1158,6 +1168,13 @@ async function ask() {
   const input = document.getElementById('chatInput');
   const q = input.value.trim();
   if (!q) return;
+  // 没有记录级检索标识时，单视频问答发出去会带 task_id:null → 后端 422。
+  // 与其抛"请求失败"，不如提前讲清楚，并提示"搜索所有视频"仍可用。
+  if (!document.getElementById('globalToggle').checked && !currentTaskId) {
+    document.getElementById('chatLog').innerHTML +=
+      '<div class="chat-msg assistant">这条记录没有可检索的标识（后端未返回 rag.task_id），暂时不能对它单独提问。可以勾选"搜索所有视频"提问，或刷新页面重试。</div>';
+    return;
+  }
   const log = document.getElementById('chatLog');
   log.innerHTML += `<div class="chat-msg user">${esc(q)}</div>`;
   input.value = '';

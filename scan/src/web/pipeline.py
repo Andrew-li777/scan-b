@@ -64,16 +64,9 @@ def make_task_id() -> str:
 
 def sanitize_task_id(raw: str) -> str:
     """Generate a ChromaDB-safe collection name from a raw URL fragment."""
-    import hashlib
-    cleaned = re.sub(r"[^a-zA-Z0-9._-]", "_", raw)
-    cleaned = cleaned.strip("_.-")
-    if not cleaned or len(cleaned) < 3:
-        cleaned = "task_" + hashlib.md5(raw.encode()).hexdigest()[:16]
-    elif not cleaned[0].isalpha():
-        cleaned = "v_" + cleaned
-    if not cleaned[-1].isalnum():
-        cleaned = cleaned.rstrip("_.-")
-    return cleaned[:63]
+    from src.rag.ids import sanitize as _sanitize
+
+    return _sanitize(raw)
 
 
 async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
@@ -240,6 +233,12 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
 
         cache.set(task_id, result)
 
+        # RAG 检索标识：一律由 URL 派生（见 src/rag/ids.py），不用运行时 task_id ——
+        # 批量/分P 的 task_id 是随机 UUID，页面刷新后无从复现，历史记录会永远找不到自己的索引。
+        from src.rag.ids import task_id_for_url
+
+        index_id = task_id_for_url(meta.url or "")
+
         # Build RAG index (skipped when rag_enabled=False, saves ~1.6GB resident memory)
         if settings.rag_enabled:
             push(task_id, "status", "构建检索索引...")
@@ -249,11 +248,11 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
             segs = segment(subs)
             seg_texts = [build_text(s) for s in segs]
             seg_starts = [s[0].start for s in segs]
-            await asyncio.to_thread(build_index, task_id, seg_texts, seg_starts)
+            await asyncio.to_thread(build_index, index_id, seg_texts, seg_starts)
 
             # Also index into the global cross-video collection
             global_segs = [
-                (f"{task_id}_{i}", t, seg_starts[i], base_name)
+                (f"{index_id}_{i}", t, seg_starts[i], base_name)
                 for i, t in enumerate(seg_texts)
             ]
             await asyncio.to_thread(index_global, global_segs)
@@ -285,6 +284,7 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
             "mindmap": mermaid,
             "translated": translated,
             "base_name": base_name,
+            "rag": {"task_id": index_id},
         }))
         return True
     except Exception as e:

@@ -8,8 +8,21 @@ from pydantic import BaseModel
 
 from src.cache import cache
 from src.output.markdown import _OUTPUT_DIR
+from src.rag.ids import legacy_ids, task_id_for_url
 
 router = APIRouter()
+
+
+def _rag_ids(url: str) -> dict:
+    """记录级 RAG 检索标识：集合名从 meta.json 的 url 派生（见 src/rag/ids.py）。
+
+    task_id  = 前端问答要带的集合名
+    legacy   = 升级前的历史集合名候选，仅作排查提示
+    """
+    return {
+        "task_id": task_id_for_url(url),
+        "legacy": legacy_ids(url),
+    }
 
 
 def scan_dirs():
@@ -175,6 +188,7 @@ def _load_detail(base_name: str) -> dict | None:
             result["mindmap"] = text.strip()
 
     result["translated"] = any("\n" in s for s in result["subtitles"])
+    result["rag"] = _rag_ids(result.get("url", ""))
 
     return result
 
@@ -211,6 +225,7 @@ def history():
         created_at = mtime  # fallback for records before this fix
         tags = []
         category = ""
+        rag = _rag_ids("")
         mj = folder / "meta.json"
         if mj.exists():
             try:
@@ -218,6 +233,7 @@ def history():
                 created_at = md.get("created_at", mtime)
                 tags = md.get("tags", [])
                 category = md.get("category", "")
+                rag = _rag_ids(md.get("url", ""))
             except Exception:
                 pass
 
@@ -228,6 +244,7 @@ def history():
             "path": str(root),
             "tags": tags,
             "category": category,
+            "rag": rag,
             "files": {
                 "subtitles": str((folder / "subtitles.md").relative_to(root)),
                 "overview": str((folder / "overview.md").relative_to(root)),
