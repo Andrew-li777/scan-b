@@ -286,7 +286,7 @@ a{color:inherit;text-decoration:none}
   <div id="error" class="error"></div>
   <div id="result" class="result">
     <div class="hero">
-      <img id="thumb" src="" alt="" />
+      <img id="thumb" alt="" referrerpolicy="no-referrer" style="display:none" />
       <div class="meta">
         <h2 id="title"></h2>
         <p id="meta-line"></p>
@@ -750,8 +750,7 @@ function showHistory(idx) {
       document.getElementById('title').textContent = d.title || h.title;
       document.getElementById('meta-line').textContent = [d.platform, d.author, d.duration].filter(Boolean).join(' | ') || fmtDate(h.time);
       if (d.url) document.getElementById('meta-line').innerHTML += ` | <a href="${esc(d.url)}" target="_blank" style="color:var(--accent)">原链</a>`;
-      if (d.thumbnail) document.getElementById('thumb').src = d.thumbnail;
-      else document.getElementById('thumb').src = '';
+      setThumb(d.thumbnail);
       currentVideoUrl = d.url || '';
       currentPlatform = d.platform || '';
       /* RAG 问答的集合名必须由「记录本身」派生（见 src/rag/ids.py）。
@@ -846,7 +845,7 @@ async function analyze() {
       const d = JSON.parse(e.data);
       document.getElementById('title').textContent = d.title;
       document.getElementById('meta-line').textContent = `作者: ${d.author} | 时长: ${fmtDuration(d.duration)}`;
-      if (d.thumbnail) document.getElementById('thumb').src = d.thumbnail;
+      setThumb(d.thumbnail);
       document.getElementById('summaryLine').textContent = extractFirstSentence(d.overview || d.summary);
       currentKeypoints = d.keypoints;
       currentSubtitles = d.subtitles || [];
@@ -1154,6 +1153,19 @@ function switchTab(name) {
 
 // ── Chat ───────────────────────────
 let chatHistory = [];
+
+/* 封面图：B站图床（i0.hdslb.com）有防盗链 —— Referer 不在白名单时返回
+   403 + X-Tengine-Error: denied by Referer ACL，页面就显示裂图。
+   ① img 上加 referrerpolicy="no-referrer"（浏览器不发 Referer，实测 403→200）
+   ② 加载失败就整块隐藏，不再留裂图占位 */
+function setThumb(u) {
+  const el = document.getElementById('thumb');
+  if (!u) { el.removeAttribute('src'); el.style.display = 'none'; return; }
+  el.onload = () => { el.style.display = ''; };
+  el.onerror = () => { el.style.display = 'none'; };
+  el.style.display = 'none';
+  el.src = u;
+}
 
 function updateChatHint() {
   const isGlobal = document.getElementById('globalToggle').checked;
