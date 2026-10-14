@@ -494,3 +494,29 @@ def cleanup_audio(audio_path: Path):
         tmpdir.rmdir()
     except OSError:
         pass
+
+
+def cleanup_empty_tempdirs() -> int:
+    """删除 tempvideo 下已经空掉的临时目录，返回清理个数。
+
+    为什么需要它：下载失败 / 任务中断时 audio_path 为 None，finally 里不会调用
+    cleanup_audio → 每次留一个空目录。pipeline 里原本有一段"清理空临时目录"的收尾
+    代码，但它引用了未定义的 _TEMP_VIDEO_DIR（该常量只在本模块定义），
+    每次执行都抛 NameError 并被 `except Exception: pass` 静默吞掉 —— 从未生效过。
+    """
+    removed = 0
+    try:
+        if not _TEMP_VIDEO_DIR.exists():
+            return 0
+        for d in _TEMP_VIDEO_DIR.iterdir():
+            if not d.is_dir():
+                continue
+            try:
+                if not any(d.iterdir()):
+                    d.rmdir()
+                    removed += 1
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return removed

@@ -21,7 +21,7 @@ from src.output.markdown import _OUTPUT_DIR, generate_all
 from src.preprocess.cleaner import clean
 from src.preprocess.dedup import deduplicate
 from src.preprocess.segmenter import build_text, merge_short, segment
-from src.transcriber import cleanup_audio, download_audio, transcribe
+from src.transcriber import cleanup_audio, cleanup_empty_tempdirs, download_audio, transcribe
 from src.translate import (
     needs_translation,
     translate_keypoints,
@@ -320,10 +320,11 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
                 await asyncio.to_thread(cleanup_audio, audio_path)
             except Exception:
                 pass
-        # Clean up empty temp directories
+        # 清理临时目录：下载失败/中断时 audio_path 为空，cleanup_audio 不会被调用，
+        # 于是每跑一次就留一个空目录 —— 交给 transcriber 里的专用函数处理
+        # （原来这里写的是 `_TEMP_VIDEO_DIR`，该名字在本模块不存在 → NameError 被吞，
+        #   清理从未生效。现已改为调用 transcriber.cleanup_empty_tempdirs()）
         try:
-            for d in _TEMP_VIDEO_DIR.iterdir():
-                if d.is_dir() and not any(d.iterdir()):
-                    d.rmdir()
+            await asyncio.to_thread(cleanup_empty_tempdirs)
         except Exception:
             pass
