@@ -41,11 +41,20 @@ def _basic_ok(auth_header: str, admin_user: str, admin_hash: str) -> bool:
         user, _, password = raw.partition(":")
     except Exception:
         return False
-    if not hmac.compare_digest(user, admin_user):
+    # 用 bytes 比较：hmac.compare_digest 对含非 ASCII 的 str 会直接抛 TypeError，
+    # 攻击者/扫描器发一个畸形 Basic 头就能让鉴权路径 500（真机实测过），这里一并堵掉。
+    try:
+        if not hmac.compare_digest(user.encode("utf-8"), admin_user.encode("utf-8")):
+            return False
+    except Exception:
         return False
     if bcrypt is None:
         # 无 bcrypt 库时退回明文常量比较（仅当 admin_hash 是明文时可用）
-        return hmac.compare_digest(password, admin_hash)
+        # 同样用 bytes 比较，避免非 ASCII 值把这条路径也打成 500
+        try:
+            return hmac.compare_digest(password.encode("utf-8"), admin_hash.encode("utf-8"))
+        except Exception:
+            return False
     try:
         return bcrypt.checkpw(password.encode("utf-8"), admin_hash.encode("utf-8"))
     except ValueError:
