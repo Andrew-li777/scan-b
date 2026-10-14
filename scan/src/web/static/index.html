@@ -834,6 +834,15 @@ async function analyze() {
 
   try {
     const r = await authFetch(`/api/analyze?url=${encodeURIComponent(url)}`, { method: 'POST' });
+    if (r.status === 409) {
+      /* 同一视频已在解析：后端不再重复起流水线（否则双份吃内存 + 两条进度流互踩）。
+         此时保持当前进度流不动，只提示用户。 */
+err.textContent = '该视频正在解析中，请稍候…（进度条仍在本页显示）';
+      err.style.display = 'block';
+      btn.disabled = false;
+      document.getElementById('cancelBtn').style.display = 'none';
+      return;
+    }
     const { task_id } = await r.json();
     currentTaskId = task_id;
 

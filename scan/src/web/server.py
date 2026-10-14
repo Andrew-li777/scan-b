@@ -20,7 +20,15 @@ from src.web.history import router as history_router, scan_dirs
 from src.web.guest_rules import guest_read_allowed
 from src.web.auth import AuthMiddleware, load_admin_cred
 from src.output.html_standalone import generate_html_from_history
-from src.web.pipeline import SSE_EVENTS, cancel_task, make_task_id, push, run_pipeline, sanitize_task_id
+from src.web.pipeline import (
+    SSE_EVENTS,
+    cancel_task,
+    claim_task,
+    make_task_id,
+    push,
+    run_pipeline,
+    sanitize_task_id,
+)
 
 # Batch task tracking
 batch_tracker: dict[str, dict] = {}
@@ -117,19 +125,24 @@ def index():
 async def progress(task_id: str):
     if task_id not in SSE_EVENTS:
         SSE_EVENTS[task_id] = queue.Queue()
+    # 循环外捕获队列引用：不能每轮重新 SSE_EVENTS[task_id] ——
+    # 若此时有第二条流/新任务把该键覆盖或 pop，正在读的这条会 KeyError 崩掉。
+    q = SSE_EVENTS[task_id]
 
     async def gen():
         try:
             while True:
                 try:
-                    msg = await asyncio.to_thread(SSE_EVENTS[task_id].get, timeout=900)
+                    msg = await asyncio.to_thread(q.get, timeout=900)
                     yield f"event: {msg['event']}\ndata: {msg['data']}\n\n"
                     if msg["event"] == "done" or msg["event"] == "error":
                         break
                 except queue.Empty:
                     break
         finally:
-            SSE_EVENTS.pop(task_id, None)
+            # 只清理自己那一条队列：被别人替换过就不能 pop（否则会清掉新任务的进度）
+            if SSE_EVENTS.get(task_id) is q:
+                SSE_EVENTS.pop(task_id, None)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -138,6 +151,9 @@ async def progress(task_id: str):
 async def analyze(url: str = Query(...), parent_dir: str = Query("")):
     # 先去掉尾部斜杠：否则 rsplit("/",1)[-1] 为空串，所有以 / 结尾的 URL 会共用同一个 task_id
     task_id = sanitize_task_id(url.rstrip("/").rsplit("/", 1)[-1][:50])
+    if not claim_task(task_id):
+        # 同一 URL 已在跑：不再覆盖队列、不再起第二条流水线（会双份吃内存 + 两条流互踩）
+        raise HTTPException(409, "该视频正在解析中，请稍候（进度条仍在本页显示）")
     SSE_EVENTS[task_id] = queue.Queue()
     threading.Thread(target=asyncio.run, args=(run_pipeline(url, task_id, parent_dir=parent_dir),), daemon=True).start()
     return {"task_id": task_id}
@@ -215,12 +231,14 @@ async def batch_progress(batch_id: str):
         raise HTTPException(404, "批次不存在")
     event_id = f"batch_{batch_id}"
     SSE_EVENTS[event_id] = queue.Queue()
+    # 同 progress()：循环外捕获队列引用，避免中途被替换/pop 时 KeyError
+    q = SSE_EVENTS[event_id]
 
     async def gen():
         try:
             while True:
                 try:
-                    msg = await asyncio.to_thread(SSE_EVENTS[event_id].get, timeout=900)
+                    msg = await asyncio.to_thread(q.get, timeout=900)
                     yield f"event: {msg['event']}\ndata: {msg['data']}\n\n"
                     if msg["event"] == "batch_done":
                         break
@@ -230,7 +248,9 @@ async def batch_progress(batch_id: str):
             # 只清理 SSE 事件队列；batch_tracker 归后台线程 _run_serial 管理，
             # 若在此 pop，前端断开进度流会清掉仍在运行批次的记录 →
             # _run_serial 下一轮 batch_tracker[batch_id] 直接 KeyError 崩溃（实测只剩 P1）。
-            SSE_EVENTS.pop(event_id, None)
+            # 同样只清理自己那一条队列。
+            if SSE_EVENTS.get(event_id) is q:
+                SSE_EVENTS.pop(event_id, None)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

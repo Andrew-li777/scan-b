@@ -57,6 +57,36 @@ def _acquire_transcribe_gate(task_id: str, cancel_event: threading.Event) -> boo
     return True
 
 
+# 任务登记表：同一 URL 派生同一个 task_id，重复提交必须被挡住
+_active_tasks: set[str] = set()
+_active_lock = threading.Lock()
+
+
+def claim_task(task_id: str) -> bool:
+    """登记 task_id；已在跑则返回 False。
+
+    旧代码直接 `SSE_EVENTS[task_id] = queue.Queue()` 覆盖，会同时踩三个坑：
+      ① 两条进度流抢同一个队列（queue 是单消费者，事件被对半分，两边进度都残缺）；
+      ② 任一条先结束时 pop 掉队列 → 另一条下一次取 SSE_EVENTS[task_id] 直接 KeyError 崩掉；
+      ③ 白跑两条完整流水线（双份下载 + 双份转录内存，正好撞 OOM）。
+    """
+    with _active_lock:
+        if task_id in _active_tasks:
+            return False
+        _active_tasks.add(task_id)
+        return True
+
+
+def release_task(task_id: str) -> None:
+    with _active_lock:
+        _active_tasks.discard(task_id)
+
+
+def is_task_active(task_id: str) -> bool:
+    with _active_lock:
+        return task_id in _active_tasks
+
+
 def cancel_task(task_id: str) -> bool:
     """Signal a running pipeline to cancel. Returns True if task was found."""
     event = _running_tasks.get(task_id)
@@ -315,6 +345,7 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
         return False
     finally:
         _running_tasks.pop(task_id, None)
+        release_task(task_id)
         if audio_path:
             try:
                 await asyncio.to_thread(cleanup_audio, audio_path)
