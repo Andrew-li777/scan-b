@@ -40,6 +40,22 @@ if settings.bilibili_cookies:
 SSE_EVENTS: dict[str, queue.Queue] = {}
 _running_tasks: dict[str, threading.Event] = {}
 
+# 转录并发闸：whisper 是全流程的内存峰值（dmesg 实测本机 OOM 杀过 python，RSS 3.0–3.4GB），
+# 而 bge-m3 常驻 2.1GB 后余量更小 —— 同时跑两条无字幕视频就可能再撞 OOM。
+# 只串行化「无字幕 → whisper 转录」这一段；有字幕的视频走平台字幕，不受影响。
+_TRANSCRIBE_GATE = threading.BoundedSemaphore(max(1, int(settings.max_concurrent_transcribe or 1)))
+
+
+def _acquire_transcribe_gate(task_id: str, cancel_event: threading.Event) -> bool:
+    """取得转录闸（轮询等待以便响应取消）。返回 False = 等待期间被取消。"""
+    if _TRANSCRIBE_GATE.acquire(blocking=False):
+        return True
+    push(task_id, "status", "前方有转录任务在运行，排队等待（避免内存溢出）...")
+    while not _TRANSCRIBE_GATE.acquire(timeout=3):
+        if cancel_event.is_set():
+            return False
+    return True
+
 
 def cancel_task(task_id: str) -> bool:
     """Signal a running pipeline to cancel. Returns True if task was found."""
@@ -111,9 +127,16 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
             audio_path = await asyncio.to_thread(download_audio, url,
                 lambda pct: push(task_id, "download", f"{pct:.0f}"))
 
-            push(task_id, "status", "正在语音识别（可能需要几分钟）...")
-            subs = await asyncio.to_thread(transcribe, audio_path,
-                lambda pct: push(task_id, "transcribe", f"{pct:.0f}"))
+            # 转录段过闸（并发=1 时排队），防多任务同时转录把内存打爆
+            if not await asyncio.to_thread(_acquire_transcribe_gate, task_id, cancel_event):
+                push(task_id, "error", "任务已取消")
+                return False
+            try:
+                push(task_id, "status", "正在语音识别（可能需要几分钟）...")
+                subs = await asyncio.to_thread(transcribe, audio_path,
+                    lambda pct: push(task_id, "transcribe", f"{pct:.0f}"))
+            finally:
+                _TRANSCRIBE_GATE.release()
 
             push(task_id, "status", f"语音识别完成 ({len(subs)} 条)")
             existing_video_id = meta.video_id if meta else ""

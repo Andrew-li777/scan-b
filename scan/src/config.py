@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # RAG 总开关：False = 跳过构建检索索引步骤，省 ~1.6GB 常驻内存（whisper+LLM 主流程不受影响）
     rag_enabled: bool = False
 
+    # 转录并发闸：whisper 是全流程内存峰值所在（实测本机 OOM 杀过 python，RSS 3.0–3.4GB），
+    # 且 RAG 常驻后余量更小。串行化"无字幕视频"的转录阶段；有字幕的视频不受限。
+    max_concurrent_transcribe: int = 1
+
     # --- 离线化配置（P0：启动零外网） ---
     model_dir: str = "models"                      # 本地模型根目录（相对 PROJECT_ROOT 或绝对路径）
     embedding_model: str = "bge-m3"                # 向量嵌入模型子目录名
