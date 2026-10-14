@@ -12,7 +12,15 @@ logger = logging.getLogger(__name__)
 
 
 def _inject_cuda_path():
-    """Inject NVIDIA CUDA DLL dirs into PATH before CTranslate2 loads."""
+    """Inject NVIDIA CUDA DLL dirs into PATH before CTranslate2 loads.
+
+    Windows 专用：Linux 上 site-packages/nvidia/*/bin 不存在、CUDA Toolkit 也在
+    C:\\Program Files\\ 下，这里直接短路。另外分隔符必须用 os.pathsep ——
+    旧代码硬编码 ";"，一旦在 Linux 上真的拼进去，整个 PATH 会变成一条无效路径，
+    所有子进程（ffmpeg / yt-dlp）都会找不到命令。
+    """
+    if os.name != "nt":
+        return
     for sp in site.getsitepackages():
         nv_dir = os.path.join(sp, "nvidia")
         if not os.path.isdir(nv_dir):
@@ -20,12 +28,12 @@ def _inject_cuda_path():
         for pkg in os.listdir(nv_dir):
             bin_dir = os.path.join(nv_dir, pkg, "bin")
             if os.path.isdir(bin_dir) and bin_dir not in os.environ.get("PATH", ""):
-                os.environ["PATH"] = bin_dir + ";" + os.environ.get("PATH", "")
+                os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
     # Also check system CUDA Toolkit
     for ver in ("v13.3", "v13.0", "v12.8", "v12.6"):
         cuda_bin = rf"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\{ver}\bin"
         if os.path.isdir(cuda_bin) and cuda_bin not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = cuda_bin + ";" + os.environ.get("PATH", "")
+            os.environ["PATH"] = cuda_bin + os.pathsep + os.environ.get("PATH", "")
 
 
 _inject_cuda_path()
@@ -200,7 +208,7 @@ def _download_bilibili_audio(url: str, tmpdir: Path, progress_cb=None) -> Path:
 
     import httpx
 
-    from src.extractors.bilibili import BilibiliExtractor, _COOKIE_STR, fetch_bilibili_audio_url
+    from src.extractors.bilibili import BilibiliExtractor, fetch_bilibili_audio_url, get_cookie_str
 
     ex = BilibiliExtractor()
     bvid = ex._parse_bvid(url)
@@ -229,8 +237,9 @@ def _download_bilibili_audio(url: str, tmpdir: Path, progress_cb=None) -> Path:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36",
         "Referer": "https://www.bilibili.com",
     }
-    if _COOKIE_STR:
-        dl_headers["Cookie"] = _COOKIE_STR
+    ck = get_cookie_str()
+    if ck:
+        dl_headers["Cookie"] = ck
 
     # 本地修复：B 站部分 CDN 节点（*.bilivideo.com）证书过期导致 SSL 验证失败。
     # 音频为公开内容，verify=False 可绕过坏节点；仍保留重试以期望 DNS 轮询到正常节点。

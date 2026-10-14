@@ -88,7 +88,9 @@ def global_ask(question: str) -> str:
         f"[{r['source']} @ {_fmt_ts(r['timestamp'])}] {r['text']}"
         for r in results
     )
-    prompt = f"{_GLOBAL_SYSTEM}\n\n字幕片段:\n{context}\n\n用户问题: {question}"
+    # _GLOBAL_SYSTEM 只作为 system 传一次 —— 旧代码又拼进 prompt，
+    # 等于每问一次都重复注入一份同样的指令，白烧 token
+    prompt = f"字幕片段:\n{context}\n\n用户问题: {question}"
     return chat(_GLOBAL_SYSTEM, prompt)
 
 

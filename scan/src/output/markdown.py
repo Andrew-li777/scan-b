@@ -1,5 +1,4 @@
 import os
-import re
 from datetime import date
 from pathlib import Path
 
@@ -29,25 +28,21 @@ def _fmt_frontmatter(meta: dict) -> str:
     return "\n".join(lines)
 
 
-def generate_all(result: AnalysisResult, base_name: str, concepts: list[str] = None) -> dict[str, str]:
+def generate_all(result: AnalysisResult, base_name: str, concepts: list[str] | None = None) -> dict[str, str]:
     concepts = concepts or []
     folder = _OUTPUT_DIR / base_name
     folder.mkdir(parents=True, exist_ok=True)
     outputs = {}
-    outputs["subtitles"] = _gen_subtitles(result.meta, base_name, folder)
-    outputs["overview"] = _gen_overview(result, base_name, folder, concepts)
-    outputs["keypoints"] = _gen_keypoints(result, base_name, folder, concepts)
+    outputs["subtitles"] = _gen_subtitles(result.meta, folder)
+    outputs["overview"] = _gen_overview(result, folder, concepts)
+    outputs["keypoints"] = _gen_keypoints(result, folder, concepts)
     srt_path = folder / "subtitles.srt"
     srt_path.write_text(generate_srt(result.meta.subtitles), encoding="utf-8")
     outputs["srt"] = str(srt_path.relative_to(_OUTPUT_DIR))
     return outputs
 
 
-def _safe_name(name: str) -> str:
-    return re.sub(r"[\\/:*?\"<>|' ]", "_", name)[:80]
-
-
-def _gen_subtitles(meta: VideoMeta, base_name: str, folder: Path) -> str:
+def _gen_subtitles(meta: VideoMeta, folder: Path) -> str:
     filepath = folder / "subtitles.md"
     fm = _fmt_frontmatter({
         "title": meta.title,
@@ -75,7 +70,7 @@ def _gen_subtitles(meta: VideoMeta, base_name: str, folder: Path) -> str:
     return str(filepath.relative_to(_OUTPUT_DIR))
 
 
-def _gen_overview(result: AnalysisResult, base_name: str, folder: Path, concepts: list[str] = None) -> str:
+def _gen_overview(result: AnalysisResult, folder: Path, concepts: list[str] | None = None) -> str:
     concepts = concepts or []
     filepath = folder / "overview.md"
     meta = result.meta
@@ -113,7 +108,7 @@ def _gen_overview(result: AnalysisResult, base_name: str, folder: Path, concepts
     return str(filepath.relative_to(_OUTPUT_DIR))
 
 
-def _gen_keypoints(result: AnalysisResult, base_name: str, folder: Path, concepts: list[str] = None) -> str:
+def _gen_keypoints(result: AnalysisResult, folder: Path, concepts: list[str] | None = None) -> str:
     concepts = concepts or []
     filepath = folder / "keypoints.md"
     meta = result.meta
