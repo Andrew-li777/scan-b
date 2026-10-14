@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -9,6 +10,8 @@ from pydantic import BaseModel
 from src.cache import cache
 from src.output.markdown import _OUTPUT_DIR
 from src.rag.ids import legacy_ids, task_id_for_url
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -258,6 +261,37 @@ def history():
     return items
 
 
+def _purge_index(folder: Path, base_name: str) -> dict:
+    """删记录时同步清掉它的向量：per-video 集合 + 全局集合里该记录的条目。
+
+    旧代码是 `from src.rag.vectorstore import _client; _client.delete_collection(base_name)`：
+      ① `_client` 在导入那一刻把值绑死，未初始化时是 None → AttributeError；
+      ② base_name（如 `生信小兮_2026-09-28/[P9]_【…】`）含 `/` 与中文，Chroma 集合名规则
+         `^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]$`（3-63 字符）必然拒绝 → ValueError；
+      ③ 即使合法也对不上：写入用 URL 派生的 task_id，删除却用目录名。
+    三条叠加，全被 `except Exception: pass` 吞掉 → 索引从来没被清过，
+    全局问答会一直召回已删记录的内容。
+    """
+    meta: dict = {}
+    try:
+        mj = folder / "meta.json"
+        if mj.exists():
+            meta = json.loads(mj.read_text(encoding="utf-8"))
+    except Exception:
+        meta = {}
+    tid = task_id_for_url(meta.get("url") or "")
+    info = {"task_id": tid, "collection_removed": False, "global_removed": 0}
+    try:
+        from src.rag.vectorstore import delete_index, forget_source
+
+        info["collection_removed"] = delete_index(tid)
+        info["global_removed"] = forget_source(base_name)
+        logger.info("delete_history: 索引已清理 %s", info)
+    except Exception as e:  # 索引清理失败不应阻断删记录，但必须留痕
+        logger.warning("delete_history: 索引清理失败 task_id=%s: %s", tid, e)
+    return info
+
+
 def _delete_one(base_name: str) -> None:
     """Delete a single history record (folder + cache + chromadb collection).
     Raises FileNotFoundError if the record doesn't exist.
@@ -270,11 +304,7 @@ def _delete_one(base_name: str) -> None:
             continue
         if folder.is_dir():
             cache.delete(base_name)
-            try:
-                from src.rag.vectorstore import _client
-                _client.delete_collection(base_name)
-            except Exception:
-                pass
+            _purge_index(folder, base_name)
             shutil.rmtree(folder)
             return
     raise FileNotFoundError(base_name)

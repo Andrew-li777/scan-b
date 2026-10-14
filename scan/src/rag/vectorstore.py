@@ -95,6 +95,39 @@ def index_global(segments: list[tuple[str, str, float, str]]) -> None:
     )
 
 
+def delete_index(collection_name: str) -> bool:
+    """删除某个视频的索引集合（幂等）。True = 确实删掉了一个已存在的集合。
+
+    必须走 _get_client()，不能用裸 `_client`：后者在没人碰过向量库时是 None，而且
+    `from src.rag.vectorstore import _client` 会在导入那一刻把值绑死（永远拿不到
+    初始化后的客户端）—— 这正是「删记录不清理索引」的第一层原因。
+    """
+    if not collection_name:
+        return False
+    try:
+        _get_client().delete_collection(collection_name)  # 不存在会抛，被下面兜住
+        return True
+    except Exception:
+        return False
+
+
+def forget_source(source: str) -> int:
+    """把全局集合里属于某条记录（metadata.source == base_name）的向量一并删掉，返回删除条数。
+
+    全局问答原来会一直召回「已删记录」的内容 —— 记录没了、向量还在。
+    """
+    if not source:
+        return 0
+    try:
+        # 不传 embedding_function：按元数据删除不需要模型（避免为一次删除把 bge-m3 拉起来）
+        col = _get_client().get_collection(GLOBAL_COLLECTION)
+        before = col.count()
+        col.delete(where={"source": {"$eq": source}})
+        return max(0, before - col.count())
+    except Exception:
+        return 0
+
+
 def _rerank_or_fallback(query: str, candidates: list[dict], k: int) -> list[dict]:
     """Rerank with cross-encoder; fall back to raw top-k when the model is unavailable."""
     if len(candidates) <= k:
