@@ -38,16 +38,38 @@ def scan_dirs():
     return list(dirs.values())
 
 
+def resolve_within(root: Path, rel: str) -> Path | None:
+    """把相对路径安全解析到 root 之内；越界（../）或解析失败返回 None。
+
+    download() / _resolve_folder() / _delete_one() 原来各抄了一份 resolve + 前缀校验，
+    安全校验这种东西抄两份就会"改一处漏一处"，统一收拢到这里。
+    """
+    try:
+        resolved_root = root.resolve()
+        target = (resolved_root / rel).resolve()
+    except Exception:
+        return None
+    if target == resolved_root:
+        return None
+    if not str(target).startswith(str(resolved_root) + os.sep):
+        return None
+    return target
+
+
+def find_in_roots(rel: str, *, want_dir: bool = False) -> Path | None:
+    """在全部历史根目录里安全定位一个条目（默认要文件，want_dir=True 要目录）。"""
+    for root in scan_dirs():
+        target = resolve_within(root, rel)
+        if target is None:
+            continue
+        if (target.is_dir() if want_dir else target.exists()):
+            return target
+    return None
+
+
 def _resolve_folder(base_name: str) -> Path | None:
     """Safely resolve a base_name to an absolute folder path, or None if not found / unsafe."""
-    for root in scan_dirs():
-        resolved_root = root.resolve()
-        f = (resolved_root / base_name).resolve()
-        if not str(f).startswith(str(resolved_root) + os.sep):
-            continue
-        if f.is_dir():
-            return f
-    return None
+    return find_in_roots(base_name, want_dir=True)
 
 
 def _parse_keypoints_md(text: str) -> list[dict]:
@@ -281,6 +303,13 @@ def _purge_index(folder: Path, base_name: str) -> dict:
         meta = {}
     tid = task_id_for_url(meta.get("url") or "")
     info = {"task_id": tid, "collection_removed": False, "global_removed": 0}
+    # 缓存也要按两种键各删一次：写缓存用的是 task_id，历史里的老代码删的是 base_name
+    for key in {base_name, tid}:
+        if key:
+            try:
+                cache.delete(key)
+            except Exception:
+                pass
     try:
         from src.rag.vectorstore import delete_index, forget_source
 
@@ -297,16 +326,11 @@ def _delete_one(base_name: str) -> None:
     Raises FileNotFoundError if the record doesn't exist.
     """
     import shutil
-    for root in scan_dirs():
-        resolved_root = root.resolve()
-        folder = (resolved_root / base_name).resolve()
-        if not str(folder).startswith(str(resolved_root) + os.sep):
-            continue
-        if folder.is_dir():
-            cache.delete(base_name)
-            _purge_index(folder, base_name)
-            shutil.rmtree(folder)
-            return
+    folder = find_in_roots(base_name, want_dir=True)
+    if folder is not None:
+        _purge_index(folder, base_name)
+        shutil.rmtree(folder)
+        return
     raise FileNotFoundError(base_name)
 
 

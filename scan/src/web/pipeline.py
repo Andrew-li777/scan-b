@@ -40,6 +40,9 @@ if settings.bilibili_cookies:
 SSE_EVENTS: dict[str, queue.Queue] = {}
 _running_tasks: dict[str, threading.Event] = {}
 
+# 解析结果缓存 TTL：7 天。同 URL 再次提交可直接回放，省掉下载/转录/LLM/嵌入全流程。
+_CACHE_TTL_SECONDS = 7 * 24 * 3600
+
 # 转录并发闸：whisper 是全流程的内存峰值（dmesg 实测本机 OOM 杀过 python，RSS 3.0–3.4GB），
 # 而 bge-m3 常驻 2.1GB 后余量更小 —— 同时跑两条无字幕视频就可能再撞 OOM。
 # 只串行化「无字幕 → whisper 转录」这一段；有字幕的视频走平台字幕，不受影响。
@@ -124,6 +127,19 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
         if cancel_event.is_set():
             push(task_id, "error", "任务已取消")
             return False
+
+        # 缓存命中：同一 URL（task_id 由 URL 派生）直接回放上次结果，
+        # 省掉下载/转录/LLM/嵌入全流程。旧代码只有 cache.set 没有 cache.get，
+        # 缓存写进去从来没人读。
+        try:
+            hit = cache.get(task_id)
+        except Exception:
+            hit = None
+        if isinstance(hit, dict) and hit.get("title"):
+            push(task_id, "status", "命中本地缓存，直接返回上次解析结果")
+            push(task_id, "done", json.dumps(hit))
+            return True
+
         push(task_id, "status", "提取字幕中...")
         extractor = get_extractor(url)
         title = author = thumb = ""
@@ -284,8 +300,6 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
         (_OUTPUT_DIR / base_name / "meta.json").write_text(
             json.dumps(_meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        cache.set(task_id, result)
-
         # RAG 检索标识：一律由 URL 派生（见 src/rag/ids.py），不用运行时 task_id ——
         # 批量/分P 的 task_id 是随机 UUID，页面刷新后无从复现，历史记录会永远找不到自己的索引。
         from src.rag.ids import task_id_for_url
@@ -321,7 +335,7 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
                 ts = f"{m}:{s:02d}"
             sub_lines.append(f"[{ts}] {e.text}")
 
-        push(task_id, "done", json.dumps({
+        done_payload = {
             "title": meta.title,
             "author": meta.author,
             "duration": meta.duration,
@@ -338,7 +352,13 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
             "translated": translated,
             "base_name": base_name,
             "rag": {"task_id": index_id},
-        }))
+        }
+        # 缓存下来供下次同 URL 直接回放（带 TTL，避免过期结果被永久回放）
+        try:
+            cache.set(task_id, done_payload, expire=_CACHE_TTL_SECONDS)
+        except Exception:
+            pass
+        push(task_id, "done", json.dumps(done_payload))
         return True
     except Exception as e:
         push(task_id, "error", str(e))

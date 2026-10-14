@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import random
 import re
@@ -11,6 +12,8 @@ import httpx
 
 from src.extractors.base import BaseExtractor, clean_url
 from src.models import SubtitleEntry, VideoMeta
+
+logger = logging.getLogger(__name__)
 
 _BILI_URL_PATTERN = re.compile(
     r"(?:https?://)?(?:www\.)?bilibili\.com/video/(BV[\w]+)"
@@ -45,10 +48,7 @@ _BASE_HEADERS = {
 
 
 def _load_cookie_str() -> str:
-    """Load Bilibili cookies from Netscape-format file (BILIBILI_COOKIES env var).
-
-    优先取 os.environ；systemd 服务未注入 .env 时，兜底直接从项目 .env 读路径。
-    """
+    """（读一次，内部用）从 Netscape 格式文件解析 B 站 cookie 字符串。"""
     cookie_path = os.environ.get("BILIBILI_COOKIES", "")
     if not cookie_path:
         try:
@@ -85,7 +85,52 @@ def _load_cookie_str() -> str:
         return ""
 
 
-_COOKIE_STR = _load_cookie_str()
+_COOKIE_TTL = 60.0  # 秒：最多每 60 秒 stat 一次 cookie 文件，避免每条请求都碰磁盘
+_cookie_cache: dict = {"key": None, "value": "", "checked": 0.0}
+
+
+def _cookie_file_path() -> str:
+    """cookie 文件路径：优先环境变量，其次项目 .env（systemd 未注入 .env 时兜底）。"""
+    p = os.environ.get("BILIBILI_COOKIES", "")
+    if p:
+        return p
+    try:
+        env_file = Path(__file__).resolve().parent.parent.parent / ".env"
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("BILIBILI_COOKIES="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ""
+
+
+def get_cookie_str() -> str:
+    """带 mtime 失效的 cookie 读取 —— 改 cookie 文件后无需重启进程。
+
+    旧实现是模块级 `_COOKIE_STR = _load_cookie_str()`，只在 import 那一刻读一次：
+    cookie 过期后进程里一直是旧的，B 站接口静默降级 → 白走 whisper 转录（慢几十倍且吃内存）。
+    现在按 (路径, mtime, 大小) 缓存，文件一变立刻重读；60 秒内不重复 stat。
+    """
+    now = time.monotonic()
+    if _cookie_cache["key"] is not None and (now - _cookie_cache["checked"]) < _COOKIE_TTL:
+        return _cookie_cache["value"]
+
+    path = _cookie_file_path()
+    key = (path, None, None)
+    try:
+        if path:
+            st = Path(path).stat()
+            key = (path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = (path, None, None)
+
+    if key != _cookie_cache["key"]:
+        _cookie_cache["value"] = _load_cookie_str()
+        _cookie_cache["key"] = key
+        if _cookie_cache["value"]:
+            logger.info("Bilibili cookie 已重新加载（文件发生变更）")
+    _cookie_cache["checked"] = now
+    return _cookie_cache["value"]
 
 
 def _get_headers(ua_index: int = 0) -> dict:
@@ -93,8 +138,9 @@ def _get_headers(ua_index: int = 0) -> dict:
         "User-Agent": _USER_AGENTS[ua_index % len(_USER_AGENTS)],
         **_BASE_HEADERS,
     }
-    if _COOKIE_STR:
-        h["Cookie"] = _COOKIE_STR
+    ck = get_cookie_str()
+    if ck:
+        h["Cookie"] = ck
     return h
 
 
@@ -194,9 +240,10 @@ def expand_collection(url: str) -> tuple[list[str], str]:
 
     import yt_dlp as _yt_dlp
     opts: dict = {"quiet": True, "extract_flat": True}
-    if _COOKIE_STR:
+    ck = get_cookie_str()
+    if ck:
         # 合集页在无登录态下常被 412 风控拦（实测旧格式 URL）；带 cookie 后改走 API 可展开
-        opts["http_headers"] = {"Cookie": _COOKIE_STR, "User-Agent": _USER_AGENTS[0]}
+        opts["http_headers"] = {"Cookie": ck, "User-Agent": _USER_AGENTS[0]}
     try:
         with _yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)

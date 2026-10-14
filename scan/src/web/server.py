@@ -16,7 +16,7 @@ from src.cache import cache
 from src.config import settings
 from src.output.markdown import _OUTPUT_DIR
 from src.rag.chat import ask as rag_ask, global_ask
-from src.web.history import router as history_router, scan_dirs
+from src.web.history import find_in_roots, router as history_router
 from src.web.guest_rules import guest_read_allowed
 from src.web.auth import AuthMiddleware, load_admin_cred
 from src.output.html_standalone import generate_html_from_history
@@ -259,14 +259,11 @@ async def batch_progress(batch_id: str):
 def download(filepath: str):
     _MIME = {".md": "text/markdown", ".srt": "text/plain", ".json": "application/json",
              ".pdf": "application/pdf", ".html": "text/html"}
-    for root in scan_dirs():
-        resolved_root = root.resolve()
-        fp = (resolved_root / filepath).resolve()
-        if not (str(fp).startswith(str(resolved_root) + os.sep) or fp == resolved_root):
-            continue
-        if fp.exists():
-            mime = _MIME.get(fp.suffix, "application/octet-stream")
-            return FileResponse(fp, filename=fp.name, media_type=mime)
+    # 路径校验统一走 history.find_in_roots（原实现和 _resolve_folder 各抄了一份）
+    fp = find_in_roots(filepath)
+    if fp is not None:
+        mime = _MIME.get(fp.suffix, "application/octet-stream")
+        return FileResponse(fp, filename=fp.name, media_type=mime)
     raise HTTPException(404, "文件不存在")
 
 
