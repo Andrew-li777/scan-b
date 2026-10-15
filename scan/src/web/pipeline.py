@@ -15,6 +15,7 @@ from src.cache import cache
 from src.classify import classify
 from src.config import settings
 from src.extractors import get_extractor
+from src.urlutil import https_url
 from src.extractors.base import clean_url
 from src.models import AnalysisResult, SubtitleEntry, VideoMeta
 from src.output.markdown import _OUTPUT_DIR, generate_all
@@ -150,7 +151,7 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
             title = meta.title
             author = meta.author
             duration = meta.duration
-            thumb = meta.thumbnail
+            thumb = https_url(meta.thumbnail)
         except Exception as e:
             push(task_id, "status", f"API 提取失败 ({e})，改用语音识别...")
             opts = {"quiet": True, "no_warnings": True, "extract_flat": False, **_BILI_YTDLP_OPTS}
@@ -160,7 +161,7 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
                 title = info.get("title", "") or title
                 author = info.get("uploader", "") or author
                 duration = int(info.get("duration", 0) or 0) or duration
-                thumb = info.get("thumbnail", "") or thumb
+                thumb = https_url(info.get("thumbnail", "")) or thumb
             except Exception:
                 pass
             meta = None

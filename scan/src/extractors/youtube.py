@@ -10,6 +10,7 @@ from youtube_transcript_api._errors import (
 
 from src.extractors.base import BaseExtractor, clean_url
 from src.models import SubtitleEntry, VideoMeta
+from src.urlutil import https_url
 
 _YT_URL_PATTERN = re.compile(
     r"(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([\w-]{11})"
@@ -49,7 +50,7 @@ class YouTubeExtractor(BaseExtractor):
             url=url,
             duration=int(info.get("duration", 0) or 0),
             author=info.get("uploader", ""),
-            thumbnail=info.get("thumbnail", ""),
+            thumbnail=https_url(info.get("thumbnail", "")),
             subtitles=subs,
         )
 

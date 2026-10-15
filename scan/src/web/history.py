@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from src.cache import cache
 from src.output.markdown import _OUTPUT_DIR
 from src.rag.ids import legacy_ids, task_id_for_url
+from src.urlutil import https_url
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +149,9 @@ def _load_detail(base_name: str) -> dict | None:
         try:
             meta = json.loads(mj.read_text(encoding="utf-8"))
             result["title"] = meta.get("title", base_name)
-            result["thumbnail"] = meta.get("thumbnail", "")
+            # 归一为 https：仓库里的旧记录存的是 http://iX.hdslb.com/...，
+            # 而线上 Caddy 下发的 CSP 只放行 https://*.hdslb.com → 直接显示会被拒载。
+            result["thumbnail"] = https_url(meta.get("thumbnail", ""))
             result["platform"] = meta.get("platform", "")
             result["author"] = meta.get("author", "")
             result["duration"] = meta.get("duration", "")

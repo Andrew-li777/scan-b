@@ -24,7 +24,7 @@ fi
 
 # ── 分组 ──────────────────────────────────────────────────────
 OFFLINE=(verify_b2.py verify_a6.py verify_a1.py verify_a3a7.py verify_a5.py verify_b3.py)
-SERVICE=(verify_a4.py verify_b1.py verify_b1b.py verify_b4.py)
+SERVICE=(verify_a4.py verify_b1.py verify_b1b.py verify_b4.py verify_thumb.py)
 
 RUN_SERVICE=0
 E2E_ARGS=()

@@ -12,6 +12,7 @@ import httpx
 
 from src.extractors.base import BaseExtractor, clean_url
 from src.models import SubtitleEntry, VideoMeta
+from src.urlutil import https_url
 
 logger = logging.getLogger(__name__)
 
@@ -333,7 +334,7 @@ class BilibiliExtractor(BaseExtractor):
             url=clean_url(url),
             duration=duration,
             author=info.get("owner", {}).get("name", ""),
-            thumbnail=info.get("pic", ""),
+            thumbnail=https_url(info.get("pic", "")),
             subtitles=subs,
             subtitle_source=self.last_subtitle_source,
         )

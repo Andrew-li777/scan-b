@@ -1166,14 +1166,20 @@ let chatHistory = [];
 /* 封面图：B站图床（i0.hdslb.com）有防盗链 —— Referer 不在白名单时返回
    403 + X-Tengine-Error: denied by Referer ACL，页面就显示裂图。
    ① img 上加 referrerpolicy="no-referrer"（浏览器不发 Referer，实测 403→200）
-   ② 加载失败就整块隐藏，不再留裂图占位 */
+   ② 记录里存的封面是 http:// 开头，而线上 Caddy 下发的 CSP 只放行
+      https://*.hdslb.com（scheme 严格匹配）→ http 会被 CSP 直接拒载。
+      这里再兜一层：http 一律提升为 https（B站图床 https 可用）。
+   ③ 加载失败就整块隐藏，不再留裂图占位 */
 function setThumb(u) {
   const el = document.getElementById('thumb');
   if (!u) { el.removeAttribute('src'); el.style.display = 'none'; return; }
+  let src = String(u).trim();
+  if (/^http:\/\//i.test(src)) src = 'https://' + src.slice(7);
+  else if (src.startsWith('//')) src = 'https:' + src;
   el.onload = () => { el.style.display = ''; };
   el.onerror = () => { el.style.display = 'none'; };
   el.style.display = 'none';
-  el.src = u;
+  el.src = src;
 }
 
 function updateChatHint() {

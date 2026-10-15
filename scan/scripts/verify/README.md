@@ -38,6 +38,7 @@ SCAN_PYTHON=/path/to/venv/bin/python ./run_all.sh
 | `verify_b1.py` | #65 B1 | `_build_messages` 单元行为 + 真实两轮指代问答 | ✅ |
 | `verify_b1b.py` | #65 B1 | **决定性**：暗号对照（无历史→答不出，有历史→复述） | ✅ |
 | `verify_b4.py` | #67 B4 | 路径穿越（明文/编码）→ 404、正常文件 200、`--with-e2e` 缓存 e2e | ✅ |
+| `verify_thumb.py` | #69 封面/CSP | `https_url` 边界、前端 setThumb 提升 + `no-referrer`、Caddy CSP 白名单、详情接口 thumbnail 无 http | ✅ |
 
 ## 环境变量
 

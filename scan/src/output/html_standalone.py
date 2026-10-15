@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from src.web.history import _load_detail
+from src.urlutil import https_url
 
 
 def _esc(s: str) -> str:
@@ -61,7 +62,7 @@ def generate_html_from_history(base_name: str) -> str | None:
         return None
 
     title = detail.get("title", base_name)
-    thumbnail = detail.get("thumbnail", "")
+    thumbnail = https_url(detail.get("thumbnail", ""))
     platform = detail.get("platform", "")
     author = detail.get("author", "")
     duration = detail.get("duration", "")
