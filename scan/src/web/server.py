@@ -16,10 +16,10 @@ from src.cache import cache
 from src.config import settings
 from src.output.markdown import _OUTPUT_DIR
 from src.rag.chat import ask as rag_ask, global_ask
-from src.web.history import find_in_roots, router as history_router
+from src.web.history import find_in_roots, visible_for_role, router as history_router
 from src.web.guest_rules import guest_read_allowed
 from src.web.auth import AuthMiddleware, load_accounts
-from src.web.roles import ADMIN, ROLES, member_allowed as _member_allowed, viewer
+from src.web.roles import ADMIN, GUEST, ROLES, USER, can_view_record, member_allowed as _member_allowed, viewer
 from src.output.html_standalone import generate_html_from_history
 from src.web.pipeline import (
     SSE_EVENTS,
@@ -161,20 +161,23 @@ async def progress(task_id: str):
 
 
 @app.post("/api/analyze")
-async def analyze(url: str = Query(...), parent_dir: str = Query("")):
+async def analyze(request: Request, url: str = Query(...), parent_dir: str = Query("")):
+    _user, _role = viewer(request)
     # 先去掉尾部斜杠：否则 rsplit("/",1)[-1] 为空串，所有以 / 结尾的 URL 会共用同一个 task_id
     task_id = sanitize_task_id(url.rstrip("/").rsplit("/", 1)[-1][:50])
     if not claim_task(task_id):
         # 同一 URL 已在跑：不再覆盖队列、不再起第二条流水线（会双份吃内存 + 两条流互踩）
         raise HTTPException(409, "该视频正在解析中，请稍候（进度条仍在本页显示）")
     SSE_EVENTS[task_id] = queue.Queue()
-    threading.Thread(target=asyncio.run, args=(run_pipeline(url, task_id, parent_dir=parent_dir),), daemon=True).start()
+    threading.Thread(target=asyncio.run, args=(run_pipeline(
+        url, task_id, parent_dir=parent_dir, owner=_user, owner_role=_role),), daemon=True).start()
     return {"task_id": task_id}
 
 
 @app.post("/api/analyze/playlist")
-async def analyze_playlist(url: str = Query(...)):
+async def analyze_playlist(request: Request, url: str = Query(...)):
     from src.extractors import expand_playlist
+    _pl_user, _pl_role = viewer(request)
     urls, author = await asyncio.to_thread(expand_playlist, url)
     if not urls:
         raise HTTPException(400, "播放列表为空或无法解析")
@@ -213,7 +216,8 @@ async def analyze_playlist(url: str = Query(...)):
                 "task_id": tid, "video": video_url.rsplit("/", 1)[-1][:40],
             }))
             try:
-                ok = await run_pipeline(video_url, tid, parent_dir=parent_dir)
+                ok = await run_pipeline(video_url, tid, parent_dir=parent_dir,
+                                        owner=_pl_user, owner_role=_pl_role)
             except Exception:
                 ok = False
             if batch_id in batch_tracker and not ok:
@@ -269,20 +273,27 @@ async def batch_progress(batch_id: str):
 
 
 @app.get("/api/download/{filepath:path}")
-def download(filepath: str):
+def download(request: Request, filepath: str):
     _MIME = {".md": "text/markdown", ".srt": "text/plain", ".json": "application/json",
              ".pdf": "application/pdf", ".html": "text/html"}
     # 路径校验统一走 history.find_in_roots（原实现和 _resolve_folder 各抄了一份）
     fp = find_in_roots(filepath)
     if fp is not None:
+        # 行级可见性：文件属于哪条记录，就按那条记录的可见性判（不可见一律 404）
+        _user, role = viewer(request)
+        if not visible_for_role(role, filepath):
+            raise HTTPException(404, "文件不存在")
         mime = _MIME.get(fp.suffix, "application/octet-stream")
         return FileResponse(fp, filename=fp.name, media_type=mime)
     raise HTTPException(404, "文件不存在")
 
 
 @app.get("/api/export/{base_name:path}")
-def export(base_name: str, format: str = "html"):
+def export(request: Request, base_name: str, format: str = "html"):
     from fastapi.responses import Response
+    _user, role = viewer(request)
+    if not visible_for_role(role, base_name):
+        raise HTTPException(404, "记录不存在")
     if format == "html":
         html = generate_html_from_history(base_name)
         if html is None:
@@ -303,11 +314,14 @@ def export(base_name: str, format: str = "html"):
 
 
 @app.get("/api/mindmap/{base_name:path}")
-def get_mindmap(base_name: str):
+def get_mindmap(request: Request, base_name: str):
     from src.analyzers.mindmap import generate_mindmap
     from src.web.history import _load_detail
     detail = _load_detail(base_name)
     if detail is None:
+        raise HTTPException(404, "记录不存在")
+    _user, role = viewer(request)
+    if not can_view_record(role, detail):
         raise HTTPException(404, "记录不存在")
     if detail.get("mindmap"):
         return {"mermaid": detail["mindmap"], "title": detail["title"]}

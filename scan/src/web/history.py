@@ -4,17 +4,60 @@ import os
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from src.cache import cache
 from src.output.markdown import _OUTPUT_DIR
 from src.rag.ids import legacy_ids, task_id_for_url
 from src.urlutil import https_url
+from src.web.roles import ADMIN, GUEST, USER, can_view_record, viewer
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _viewer_of(request) -> tuple[str, str]:
+    """请求的 (账号, 角色)；无 request（内部调用/单测）时按游客处理。"""
+    if request is None:
+        return "", GUEST
+    return viewer(request)
+
+
+def meta_for_path(rel: str) -> dict:
+    """给定记录路径（目录**或目录里的文件**），向上找最近的 meta.json 并返回其内容。
+
+    download 接口拿到的是 `标题/overview.md` 这种文件路径，而可见性记在记录目录的
+    meta.json 上，所以要往上找（最多 4 层，避免误爬到输出根目录）。
+    """
+    target = find_in_roots(rel, want_dir=True) or find_in_roots(rel)
+    if target is None:
+        return {}
+    folder = target if target.is_dir() else target.parent
+    for _ in range(4):
+        mj = folder / "meta.json"
+        if mj.exists():
+            try:
+                return json.loads(mj.read_text(encoding="utf-8"))
+            except Exception:
+                return {}
+        parent = folder.parent
+        if parent == folder:
+            break
+        folder = parent
+    return {}
+
+
+def visible_for_role(role: str, rel: str) -> bool:
+    """这条记录（或它下面的文件）对 role 可见吗？
+
+    找不到记录 / 读不到 meta → 按 public 放行（与"存量记录无归属即 public"同口径）；
+    真正的路径安全由 resolve_within 负责，这里只管可见性。
+    """
+    if role == ADMIN:
+        return True
+    return can_view_record(role, meta_for_path(rel))
 
 
 def _rag_ids(url: str) -> dict:
@@ -141,6 +184,8 @@ def _load_detail(base_name: str) -> dict | None:
         "thumbnail": "", "category": "", "tags": [],
         "platform": "", "author": "", "duration": "", "url": "",
         "mindmap": "",
+        # 行级可见性三件套（旧记录没有这三个键 → 空值 → 判为 public）
+        "owner": "", "owner_role": "", "visibility": "",
     }
 
     # Load meta.json
@@ -158,6 +203,9 @@ def _load_detail(base_name: str) -> dict | None:
             result["url"] = meta.get("url", "")
             result["category"] = meta.get("category", "")
             result["tags"] = meta.get("tags", [])
+            result["owner"] = meta.get("owner", "")
+            result["owner_role"] = meta.get("owner_role", "")
+            result["visibility"] = meta.get("visibility", "")
         except Exception:
             pass
 
@@ -222,7 +270,8 @@ def _load_detail(base_name: str) -> dict | None:
 
 
 @router.get("/api/history")
-def history():
+def history(request: Request):
+    _user, role = _viewer_of(request)
     items = []
     folders = []  # (mtime, overview_path, folder_path, root_dir)
     for root in scan_dirs():
@@ -253,6 +302,7 @@ def history():
         created_at = mtime  # fallback for records before this fix
         tags = []
         category = ""
+        owner = owner_role = visibility = ""
         rag = _rag_ids("")
         mj = folder / "meta.json"
         if mj.exists():
@@ -261,9 +311,18 @@ def history():
                 created_at = md.get("created_at", mtime)
                 tags = md.get("tags", [])
                 category = md.get("category", "")
+                owner = md.get("owner", "")
+                owner_role = md.get("owner_role", "")
+                visibility = md.get("visibility", "")
                 rag = _rag_ids(md.get("url", ""))
             except Exception:
                 pass
+
+        # 行级可见性：看不见的记录直接从列表里消失（不是灰掉/报错）——
+        # 与"详情/导图/下载返回 404"是同一规则（can_view_record）。
+        if not can_view_record(role, {"owner": owner, "owner_role": owner_role,
+                                      "visibility": visibility}):
+            continue
 
         items.append({
             "base_name": rel,
@@ -272,6 +331,9 @@ def history():
             "path": str(root),
             "tags": tags,
             "category": category,
+            "owner": owner,
+            "owner_role": owner_role,
+            "visibility": visibility,
             "rag": rag,
             "files": {
                 "subtitles": str((folder / "subtitles.md").relative_to(root)),
@@ -337,8 +399,26 @@ def _delete_one(base_name: str) -> None:
     raise FileNotFoundError(base_name)
 
 
+def _can_delete(user: str, role: str, base_name: str) -> bool:
+    """这条记录能不能被当前身份删掉？
+
+    管理员全可删；常规用户**只能删自己建的**（meta.json 的 owner 等于本人）。
+    存量无归属记录（owner 为空）常规用户删不掉 —— 它们不属于任何人。
+    """
+    if role == ADMIN:
+        return True
+    if role != USER or not user:
+        return False
+    md = meta_for_path(base_name)
+    return (md.get("owner") or "") == user
+
+
 @router.delete("/api/history/{base_name:path}")
-def delete_history(base_name: str):
+def delete_history(request: Request, base_name: str):
+    user, role = _viewer_of(request)
+    if not _can_delete(user, role, base_name):
+        # 不区分"不存在"与"不是你的"：一律 404，避免暴露别人的记录名是否存在
+        raise HTTPException(404, "记录不存在")
     try:
         _delete_one(base_name)
     except FileNotFoundError:
@@ -351,14 +431,19 @@ class BatchDeleteRequest(BaseModel):
 
 
 @router.post("/api/history/batch_delete")
-def batch_delete(req: BatchDeleteRequest):
+def batch_delete(request: Request, req: BatchDeleteRequest):
     if not req.base_names:
         raise HTTPException(400, "未选择记录")
     if len(req.base_names) > 200:
         raise HTTPException(400, "单次最多 200 条")
+    user, role = _viewer_of(request)
     deleted: list[str] = []
     failed: list[dict] = []
     for bn in req.base_names:
+        # 别人的记录：整批不报 403，逐条进 failed（前端一次勾选里混着别人的是常态）
+        if not _can_delete(user, role, bn):
+            failed.append({"base_name": bn, "error": "只能删除自己解析的记录" if role == USER else "权限不足"})
+            continue
         try:
             _delete_one(bn)
             deleted.append(bn)
@@ -370,8 +455,12 @@ def batch_delete(req: BatchDeleteRequest):
 
 
 @router.get("/api/history/{base_name:path}")
-def history_detail(base_name: str):
+def history_detail(request: Request, base_name: str):
     detail = _load_detail(base_name)
     if detail is None:
+        raise HTTPException(404, "记录不存在")
+    _user, role = _viewer_of(request)
+    if not can_view_record(role, detail):
+        # 不可见 = 不存在（404，不是 403）——403 等于承认"这条记录存在但不给你看"
         raise HTTPException(404, "记录不存在")
     return detail

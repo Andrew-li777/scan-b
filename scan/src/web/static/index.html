@@ -379,6 +379,14 @@ function getRole(){ try{ return localStorage.getItem(ROLE_KEY) || (getAuth() ? '
 function setRole(r){ try{ (r && r !== 'guest') ? localStorage.setItem(ROLE_KEY, r) : localStorage.removeItem(ROLE_KEY); }catch(e){} }
 function isAdmin(){ return getRole() === 'admin'; }
 function isMember(){ const r = getRole(); return r === 'admin' || r === 'user'; }
+// 删除归属（与服务端 history._can_delete 同口径）：管理员全可删，常规用户只删自己建的。
+// 前端只做提示与置灰，真正的判定永远在服务端。
+function canDelete(h){ return isAdmin() || (isMember() && !!h.owner && h.owner === ME.user); }
+function lockBadge(h){
+  if(!isMember() || canDelete(h)) return '';
+  return '<span title="只能删除自己解析的记录，管理员可以删除任意记录" style="font-size:0.65rem;color:var(--ink-soft);border:1px solid var(--ink-soft);border-radius:3px;padding:0 4px;margin-left:6px">🔒 不可删</span>';
+}
+function cbAttr(i){ return (isMember() && !canDelete(currentHistory[i])) ? 'disabled title="只能删除自己解析的记录"' : 'title="选择"'; }
 async function refreshMe(){
   try{
     const r = await fetch('/api/whoami', { headers: _authHeaders() });
@@ -568,10 +576,10 @@ async function loadHistory() {
           const tagHtml = h.tags && h.tags.length ? `<div style="display:flex;gap:3px;flex-wrap:wrap;margin-top:4px">${h.tags.slice(0,3).map(t => `<span style="font-size:0.65rem;color:${color};border:1px solid ${color}88;border-radius:3px;padding:0 4px">${esc(t)}</span>`).join('')}</div>` : '';
           html += `<div class="history-item" data-idx="${i}">
           <div style="display:flex;align-items:flex-start;gap:6px">
-            <input type="checkbox" class="hi-cb" data-idx="${i}" onclick="event.stopPropagation(); updateBulkBtns()" style="margin-top:2px;flex-shrink:0" title="选择">
+            <input type="checkbox" class="hi-cb" data-idx="${i}" onclick="event.stopPropagation(); updateBulkBtns()" style="margin-top:2px;flex-shrink:0" ${cbAttr(i)}>
             <div style="flex:1;min-width:0" onclick="showHistory(${i})">
               <div class="hi-title">${esc(h.title)}</div>
-              <div class="hi-time">${fmtDate(h.time)}</div>
+              <div class="hi-time">${fmtDate(h.time)}${lockBadge(h)}</div>
               ${tagHtml}
           </div>
         </div></div>`;
@@ -585,11 +593,11 @@ async function loadHistory() {
         const tagHtml = h.tags && h.tags.length ? `<div style="display:flex;gap:3px;flex-wrap:wrap;margin-top:4px">${h.tags.slice(0,3).map(t => `<span style="font-size:0.65rem;color:${color};border:1px solid ${color}88;border-radius:3px;padding:0 4px">${esc(t)}</span>`).join('')}</div>` : '';
         html += `<div class="history-item" data-idx="${i}">
           <div style="display:flex;align-items:flex-start;gap:6px">
-            <input type="checkbox" class="hi-cb" data-idx="${i}" onclick="event.stopPropagation(); updateBulkBtns()" style="margin-top:2px;flex-shrink:0" title="选择">
+            <input type="checkbox" class="hi-cb" data-idx="${i}" onclick="event.stopPropagation(); updateBulkBtns()" style="margin-top:2px;flex-shrink:0" ${cbAttr(i)}>
             <div style="flex:1;min-width:0" onclick="showHistory(${i})">
               <div class="hi-path" style="color:${color};border:1px solid ${color}99" title="${esc(path)}">${esc(label)}</div>
               <div class="hi-title">${esc(h.title)}</div>
-              <div class="hi-time">${fmtDate(h.time)}</div>
+              <div class="hi-time">${fmtDate(h.time)}${lockBadge(h)}</div>
               ${tagHtml}
           </div>
         </div></div>`;

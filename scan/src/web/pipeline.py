@@ -119,8 +119,14 @@ def sanitize_task_id(raw: str) -> str:
     return _sanitize(raw)
 
 
-async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
-    """Full analysis pipeline. Pushes progress events via SSE_EVENTS."""
+async def run_pipeline(url: str, task_id: str, parent_dir: str = "",
+                       owner: str = "", owner_role: str = "") -> bool:
+    """Full analysis pipeline. Pushes progress events via SSE_EVENTS.
+
+    owner / owner_role：发起人与其角色（2026-10-15 引入行级可见性）。
+    写入 meta.json，决定这条记录谁能看：常规用户建的 → members（仅登录用户可见），
+    管理员建的 → public（游客也可见）。默认空值 = 无归属 = public（存量记录同理）。
+    """
     cancel_event = threading.Event()
     _running_tasks[task_id] = cancel_event
     audio_path = None
@@ -290,6 +296,11 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "") -> bool:
             "author": meta.author, "duration": meta.duration,
             "url": meta.url, "thumbnail": meta.thumbnail,
             "concepts": concepts, "created_at": time.time(),
+            # 行级可见性（2026-10-15）：归属 + 谁能看。
+            # 常规用户建的记录 → members（仅登录用户与管理员可见）；
+            # 管理员建的 / 无归属 → public（游客也能看，与存量 36 条一致）。
+            "owner": owner, "owner_role": owner_role,
+            "visibility": "members" if (owner_role or "") == "user" else "public",
         }
         if meta.subtitles:
             push(task_id, "status", "分类中...")
