@@ -25,6 +25,11 @@ def guest_read_allowed(method: str, path: str) -> bool:
     if p in ("/", "/favicon.ico", "/robots.txt", "/sitemap.xml"):
         return True
 
+    # 身份查询：游客也要能问"我是谁"（前端据此决定显示游客视图还是登录视图），
+    # 返回内容只有 {user:"", role:"guest"}，无泄露面
+    if p == "/api/whoami":
+        return True
+
     # 自托管静态资源（vendor/mermaid.min.js 等前端库，无敏感内容）
     if p.startswith("/static/"):
         return True

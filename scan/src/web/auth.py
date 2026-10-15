@@ -1,19 +1,40 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""游客/管理员鉴权中间件（通用，两服务共用逻辑）
+"""鉴权中间件（通用，两服务共用逻辑）
 
-- 无 Authorization 头            → 游客（只读白名单）
-- 有头且 bcrypt 校验通过（用户+密码）→ 管理员（全功能）
-- 有头但校验失败                → 401
+三种角色（2026-10-15 起，见 `src/web/roles.py`）
+------------------------------------------------
+- 无 Authorization 头                  → 游客（只读白名单）
+- 有头且 bcrypt 校验通过              → 按凭据文件里的角色：`admin`（全放行）/ `user`（受限）
+- 有头但校验失败                      → 401（不降级为游客，防伪装）
+
+凭据文件格式
+------------
+单账号（旧格式，仍完全支持；**缺 `角色:` 行 = admin**）：
+
+    账号: scanuser
+    密码: ********        # 明文仅供人读，程序不使用
+    bcrypt: $2a$14$...
+
+多账号：出现第二个 `账号:` 行即开始新记录（顺序无关，键名支持中英文）：
+
+    账号: scanuser
+    bcrypt: $2a$14$...
+    角色: admin
+
+    账号: alice
+    bcrypt: $2a$14$...
+    角色: user
 
 用法：
     app.add_middleware(AuthMiddleware,
-                       admin_user="translate",
-                       admin_hash="$2a$14$...",
-                       is_read_allowed=fn(method, path) -> bool,
+                       accounts=load_accounts(),          # {账号: (bcrypt, 角色)}
+                       is_read_allowed=fn(method, path) -> bool,   # 游客白名单
+                       member_allowed=fn(method, path) -> bool,    # 登录用户白名单
                        rate_limits=[(prefix, limit_per_min, window_sec)])
 
-is_read_allowed 返回 True 表示游客放行；返回 False 表示需管理员。
+哈希**绝不进公开仓库**：读不到哈希的账号一律不可登录（fail closed），
+游客浏览不受影响。
 """
 import base64
 import hmac
@@ -26,39 +47,68 @@ from typing import Callable
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
+from src.web.roles import ADMIN, GUEST, USER, normalize_role
+
 try:
     import bcrypt
 except ImportError:  # pragma: no cover
     bcrypt = None
 
 
-def _basic_ok(auth_header: str, admin_user: str, admin_hash: str) -> bool:
-    """解析 Basic 凭据并校验。常量时间比较，防时序攻击。"""
+def verify_credentials(
+    auth_header: str, accounts: dict[str, tuple[str, str]]
+) -> tuple[str, str] | None:
+    """解析 Basic 凭据并核对。成功返回 `(账号, 角色)`，失败返回 `None`。
+
+    - 账号名用 bytes 常量时间比较：`hmac.compare_digest` 对含非 ASCII 的 str 会直接抛
+      TypeError，攻击者/扫描器发一个畸形 Basic 头就能把鉴权路径打成 500（真机实测过）。
+    - 密码用 bcrypt 校验；无 bcrypt 库时退回明文常量比较（仅当存的是明文时可用）。
+    - 不提前 return，遍历完所有账号再定论（减少"账号是否存在"的时序侧信道）。
+    """
     if not auth_header or not auth_header.startswith("Basic "):
-        return False
+        return None
     try:
         raw = base64.b64decode(auth_header[6:].strip()).decode("utf-8")
         user, _, password = raw.partition(":")
     except Exception:
-        return False
-    # 用 bytes 比较：hmac.compare_digest 对含非 ASCII 的 str 会直接抛 TypeError，
-    # 攻击者/扫描器发一个畸形 Basic 头就能让鉴权路径 500（真机实测过），这里一并堵掉。
-    try:
-        if not hmac.compare_digest(user.encode("utf-8"), admin_user.encode("utf-8")):
-            return False
-    except Exception:
-        return False
-    if bcrypt is None:
-        # 无 bcrypt 库时退回明文常量比较（仅当 admin_hash 是明文时可用）
-        # 同样用 bytes 比较，避免非 ASCII 值把这条路径也打成 500
+        return None
+    if not user:
+        return None
+
+    hit: tuple[str, str] | None = None
+    for name, (stored, role) in accounts.items():
+        if not stored:
+            continue
         try:
-            return hmac.compare_digest(password.encode("utf-8"), admin_hash.encode("utf-8"))
+            if hmac.compare_digest(user.encode("utf-8"), name.encode("utf-8")):
+                hit = (name, stored)
+                _ = role
         except Exception:
-            return False
-    try:
-        return bcrypt.checkpw(password.encode("utf-8"), admin_hash.encode("utf-8"))
-    except ValueError:
-        return False
+            continue
+    if hit is None:
+        return None
+
+    name, stored = hit
+    if bcrypt is None:
+        try:
+            ok = hmac.compare_digest(password.encode("utf-8"), stored.encode("utf-8"))
+        except Exception:
+            ok = False
+    else:
+        try:
+            ok = bcrypt.checkpw(password.encode("utf-8"), stored.encode("utf-8"))
+        except ValueError:
+            ok = False
+        except Exception:
+            ok = False
+    if not ok:
+        return None
+
+    role = normalize_role(accounts.get(name, ("", ""))[1])
+    # 游客身份不能由凭据文件授予（否则等于"有账号但无权限"的第三种怪状态）
+    if role == GUEST:
+        role = USER
+    return name, role
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -66,15 +116,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self,
         app,
         *,
-        admin_user: str,
-        admin_hash: str,
+        accounts: dict[str, tuple[str, str]] | None = None,
+        admin_user: str = "",
+        admin_hash: str = "",
         is_read_allowed: Callable[[str, str], bool],
+        member_allowed: Callable[[str, str], bool] | None = None,
         rate_limits: list[tuple[str, int, int]] | None = None,
     ):
         super().__init__(app)
-        self.admin_user = admin_user
-        self.admin_hash = admin_hash
+        self.accounts: dict[str, tuple[str, str]] = dict(accounts or {})
+        # 兼容旧调用方式（传单个 admin_user/admin_hash）
+        if admin_user and admin_hash:
+            self.accounts.setdefault(admin_user, (admin_hash, ADMIN))
         self.is_read_allowed = is_read_allowed
+        self.member_allowed = member_allowed
         self.rate_limits = rate_limits or []
         self._hits: dict[tuple[str, str], list[float]] = defaultdict(list)
 
@@ -96,13 +151,32 @@ class AuthMiddleware(BaseHTTPMiddleware):
         method = request.method
         auth = request.headers.get("authorization", "")
 
-        # 管理员：凭据有效 → 全放行
-        if _basic_ok(auth, self.admin_user, self.admin_hash):
-            return await call_next(request)
+        # 身份写进 scope：路由层要靠它做行级可见性判断（列表过滤 / 详情 404）
+        state = request.scope.setdefault("state", {})
+        state["user"], state["role"] = "", GUEST
 
-        # 有凭据但无效 → 401（不降级为游客，防伪装）
         if auth.strip():
-            return JSONResponse({"detail": "凭据无效"}, status_code=401)
+            hit = verify_credentials(auth, self.accounts)
+            if hit is None:
+                return JSONResponse({"detail": "凭据无效"}, status_code=401)
+            user, role = hit
+            state["user"], state["role"] = user, role
+
+            if role != ADMIN:
+                if role == USER and self.member_allowed is not None:
+                    allowed = self.member_allowed(method, path)
+                else:
+                    allowed = method in ("GET", "HEAD", "OPTIONS") and self.is_read_allowed(method, path)
+                if not allowed:
+                    return JSONResponse(
+                        {"detail": "权限不足：该操作需要管理员", "role": role},
+                        status_code=403,
+                        headers={"X-Role": role},
+                    )
+            ok, code = self._rate_ok(request.client.host if request.client else "?", path)
+            if not ok:
+                return JSONResponse({"detail": "请求过于频繁"}, status_code=code)
+            return await call_next(request)
 
         # 游客：只读白名单
         if method in ("GET", "HEAD", "OPTIONS") and self.is_read_allowed(method, path):
@@ -118,23 +192,33 @@ class AuthMiddleware(BaseHTTPMiddleware):
         )
 
 
-def load_admin_cred(path: str | None = None) -> tuple[str, str]:
-    """从**服务器本地**凭据文件读取管理员账号与 bcrypt 哈希。
+def load_accounts(path: str | None = None) -> dict[str, tuple[str, str]]:
+    """从**服务器本地**凭据文件读取全部账号 → `{账号: (bcrypt 哈希, 角色)}`。
 
     ⚠️ 哈希绝不能写进代码仓库（仓库是公开的）：bcrypt 不可逆，但可离线爆破，
     且 hash 一旦泄漏，不轮换密码就无法撤回。
 
-    文件格式（键名支持中英文，分隔符 `:` 或 `=`）：
-        账号: scanuser           # 或 user=scanuser
-        密码: ********            # 明文仅供人读，程序不使用
-        bcrypt: $2a$14$...       # 或 hash=
+    解析规则（键名支持中英文，分隔符 `:` 或 `=`）：
+    - 见到 `账号:`/`user:` 就开始一条新记录（把上一条 flush 掉）→ 天然支持多账号
+    - `bcrypt:`/`hash:` 作为哈希；`角色:`/`role:` 作为角色
+    - **没有 `角色:` 行 → 视为 admin**（旧单账号文件零改动继续可用）
+    - 只有同时有账号名和哈希的记录才会生效（缺哈希 = 该账号不可登录，fail closed）
+    - `密码:` 行仅给人读，程序忽略
 
     路径优先级：参数 > 环境变量 `ADMIN_CRED_FILE` > `/root/.scan-web-cred`。
-    读不到哈希时返回 `(user, "")` —— 管理员登录**一律失败（fail closed）**，
-    游客只读浏览不受影响。
     """
     p = Path(path or os.environ.get("ADMIN_CRED_FILE", "/root/.scan-web-cred"))
-    user, admin_hash = "", ""
+    accounts: dict[str, tuple[str, str]] = {}
+    cur_user = ""
+    cur_hash = ""
+    cur_role = ""
+
+    def flush() -> None:
+        nonlocal cur_user, cur_hash, cur_role
+        if cur_user and cur_hash:
+            accounts[cur_user] = (cur_hash, cur_role or ADMIN)
+        cur_user, cur_hash, cur_role = "", "", ""
+
     try:
         for raw in p.read_text(encoding="utf-8").splitlines():
             line = raw.strip()
@@ -146,12 +230,28 @@ def load_admin_cred(path: str | None = None) -> tuple[str, str]:
             idx = min(cands)
             k = line[:idx].strip().lower()
             v = line[idx + 1:].strip()
-            if k in ("账号", "user", "username"):
-                user = v
+            if k in ("账号", "user", "username", "name"):
+                flush()
+                cur_user = v
             elif k in ("bcrypt", "hash", "bcrypt_hash", "passhash"):
-                admin_hash = v
+                cur_hash = v
+            elif k in ("角色", "role"):
+                cur_role = normalize_role(v)
     except FileNotFoundError:
         pass
     except Exception:
         pass
-    return user, admin_hash
+    flush()
+    return accounts
+
+
+def load_admin_cred(path: str | None = None) -> tuple[str, str]:
+    """相容旧接口：返回**第一个管理员账号**的 `(账号, bcrypt)`；没有则 `("", "")`。
+
+    新代码请用 `load_accounts()`。
+    """
+    accounts = load_accounts(path)
+    for name, (h, role) in accounts.items():
+        if role == ADMIN:
+            return name, h
+    return "", ""

@@ -207,6 +207,7 @@ a{color:inherit;text-decoration:none}
 .auth-guest{color:var(--ink-soft);cursor:pointer;border:1px dashed var(--line);padding:3px 8px;border-radius:4px;font-size:.66rem}
 .auth-guest:hover{border-color:var(--accent);color:var(--accent)}
 .auth-admin{color:var(--ok);border:1px solid var(--ok);padding:3px 8px;border-radius:4px;font-size:.66rem}
+.auth-user{color:#7A5C8E;border:1px solid #7A5C8E;padding:3px 8px;border-radius:4px;font-size:.66rem}
 .auth-mini-btn{padding:3px 10px;border:1px solid var(--line);border-radius:4px;background:var(--paper-warm);color:var(--ink-soft);cursor:pointer;font-size:.66rem;font-family:var(--font-mono);transition:all .15s}
 .auth-mini-btn:hover{border-color:var(--accent);color:var(--accent)}
 .login-box{width:min(380px,92vw);background:var(--paper);border:1px solid var(--line);border-radius:8px;box-shadow:0 16px 48px rgba(0,0,0,.22)}
@@ -328,7 +329,7 @@ a{color:inherit;text-decoration:none}
       <button onclick="closeLoginModal()">✕</button>
     </div>
     <div class="login-body">
-      <p class="kicker" style="color:var(--ink-soft);margin-bottom:12px">游客仅可浏览历史记录，解析/对话/下载等操作需登录。</p>
+      <p class="kicker" style="color:var(--ink-soft);margin-bottom:12px">游客仅可浏览历史记录；解析/对话/下载等需登录。常规用户每日 100 条解析额度，合集/批量/对比仅管理员。</p>
       <label class="modal-label">账号 · USER</label>
       <input type="text" id="loginUser" placeholder="账号" autocomplete="username">
       <label class="modal-label">密码 · PASSWORD</label>
@@ -368,13 +369,33 @@ function setTheme(t) {
 const AUTH_KEY = 'scan-basic-auth';
 function getAuth(){ try{ return localStorage.getItem(AUTH_KEY) || ''; }catch(e){ return ''; } }
 function setAuth(v){ try{ v ? localStorage.setItem(AUTH_KEY, v) : localStorage.removeItem(AUTH_KEY); }catch(e){} }
-function isAdmin(){ return !!getAuth(); }
+/* 角色：guest（游客）/ user（常规用户）/ admin（管理员）。
+   旧版是「有凭据即管理员」的二元判断，现改为以 /api/whoami 回包为准；
+   缓存到 localStorage 只是为了让同步渲染路径（isAdmin()）在首屏就能拿到值，
+   真正的权威判定始终在服务端中间件。 */
+const ROLE_KEY = AUTH_KEY + ':role';
+let ME = { user: '', role: '' };          // /api/whoami 最近一次回包
+function getRole(){ try{ return localStorage.getItem(ROLE_KEY) || (getAuth() ? 'admin' : 'guest'); }catch(e){ return getAuth() ? 'admin' : 'guest'; } }
+function setRole(r){ try{ (r && r !== 'guest') ? localStorage.setItem(ROLE_KEY, r) : localStorage.removeItem(ROLE_KEY); }catch(e){} }
+function isAdmin(){ return getRole() === 'admin'; }
+function isMember(){ const r = getRole(); return r === 'admin' || r === 'user'; }
+async function refreshMe(){
+  try{
+    const r = await fetch('/api/whoami', { headers: _authHeaders() });
+    if(r.ok){ const d = await r.json(); ME = { user: d.user || '', role: d.role || 'guest' }; setRole(ME.role); }
+    else { ME = { user: '', role: 'guest' }; setRole('guest'); }
+  }catch(e){ /* 网络异常：保持缓存角色，不清登录态 */ }
+  updateAuthBadge();
+}
 function _authHeaders(h){ const a = getAuth(); if(a){ h = h || {}; h['Authorization'] = 'Basic ' + a; } return h || {}; }
 function updateAuthBadge(){
   const badge = document.getElementById('auth-badge'), btn = document.getElementById('auth-btn'), lo = document.getElementById('logout-btn');
   if(!badge) return;
-  if(isAdmin()){
-    badge.textContent = '已登录 · ADMIN'; badge.className = 'kicker auth-admin'; badge.onclick = null; badge.title = '';
+  const r = getRole();
+  if(r === 'admin' || r === 'user'){
+    badge.textContent = r === 'admin' ? '已登录 · 管理员' : '已登录 · 常规用户';
+    badge.className = 'kicker ' + (r === 'admin' ? 'auth-admin' : 'auth-user');
+    badge.onclick = null; badge.title = ME.user ? ('账号：' + ME.user) : '';
     if(btn) btn.style.display = 'none';
     if(lo) lo.style.display = 'inline-block';
   } else {
@@ -382,6 +403,9 @@ function updateAuthBadge(){
     if(btn) btn.style.display = 'inline-block';
     if(lo) lo.style.display = 'none';
   }
+  // 批量解析（合集/分P）仅管理员 —— 常规用户点它只会吃 403，直接从界面撤掉
+  const bb = document.getElementById('batchBtn');
+  if(bb) bb.style.display = isAdmin() ? '' : 'none';
 }
 function openLoginModal(){ document.getElementById('loginMsg').textContent = ''; document.getElementById('loginModal').classList.add('show'); document.getElementById('loginUser').focus(); }
 function closeLoginModal(){ document.getElementById('loginModal').classList.remove('show'); }
@@ -391,12 +415,24 @@ async function doLogin(){
   const token = btoa(u + ':' + p);
   try{
     const r = await fetch('/api/history', { headers: { 'Authorization': 'Basic ' + token } });
-    if(r.ok){ setAuth(token); updateAuthBadge(); closeLoginModal(); document.getElementById('loginPass').value=''; loadHistory(); }
+    if(r.ok){
+      setAuth(token);
+      // 登录成功后立刻问一次身份：常规用户与管理员看到的功能不同
+      try{
+        const wr = await fetch('/api/whoami', { headers: {'Authorization': 'Basic ' + token} });
+        if(wr.ok){ const d = await wr.json(); ME = { user: d.user || '', role: d.role || 'admin' }; setRole(ME.role); }
+        else { setRole('admin'); }
+      }catch(e){ setRole('admin'); }
+      updateAuthBadge(); closeLoginModal(); document.getElementById('loginPass').value=''; loadHistory();
+    }
     else { document.getElementById('loginMsg').textContent = r.status === 401 ? '账号或密码错误' : '登录失败(' + r.status + ')'; }
   }catch(e){ document.getElementById('loginMsg').textContent = '网络错误'; }
 }
-function logout(){ setAuth(''); updateAuthBadge(); loadHistory(); }
-function requireLogin(){ if(isAdmin()) return true; openLoginModal(); return false; }
+function logout(){ setAuth(''); setRole(''); ME = { user: '', role: 'guest' }; updateAuthBadge(); loadHistory(); }
+// 「需要登录」：任何登录角色（常规用户/管理员）都算
+function requireLogin(){ if(isMember()) return true; openLoginModal(); return false; }
+// 「需要管理员」：常规用户明确告知无权限（不是没登录，弹登录框会更困惑）
+function requireAdmin(){ if(isAdmin()) return true; if(isMember()){ alert('该操作需要管理员权限（当前为常规用户）'); return false; } openLoginModal(); return false; }
 function authFetch(url, opts){
   opts = opts || {};
   opts.headers = _authHeaders(opts.headers);
@@ -577,6 +613,11 @@ function updateBulkBtns() {
   document.getElementById('historyActions').style.display = n > 0 ? 'block' : 'none';
   document.getElementById('delBtn').style.display = n > 0 ? 'inline' : 'none';
 
+  // 对比 / 打包导出仅管理员：直接从界面撤掉按钮（否则常规用户点了只吃 403）
+  const cbx = document.querySelector('.bulk-compare'), pbx = document.querySelector('.bulk-pdf');
+  if(cbx) cbx.style.display = isAdmin() ? '' : 'none';
+  if(pbx) pbx.style.display = isAdmin() ? '' : 'none';
+
   // Top select-all tristate
   const sa = document.getElementById('selectAll');
   sa.checked = n > 0 && n === total;
@@ -662,7 +703,7 @@ function hideCompareModal() {
 }
 
 async function compareSelected() {
-  if(!requireLogin()) return;
+  if(!requireAdmin()) return;
   const cbs = document.querySelectorAll('.hi-cb:checked');
   if (cbs.length < 2) { alert('至少选择 2 个视频'); return; }
   if (cbs.length > 5) { alert('单次最多对比 5 个视频'); return; }
@@ -685,7 +726,7 @@ async function compareSelected() {
 // 打包导出：后端 PDF 引擎不可用时曾静默产出只含 _failed.json 的 zip，
 // 现改为**HTML**（zip 内每个记录一个 .html，零依赖、单条可单独重试）。
 async function downloadSelectedZip() {
-  if(!requireLogin()) return;
+  if(!requireAdmin()) return;
   const cbs = document.querySelectorAll('.hi-cb:checked');
   if (!cbs.length) return;
   if (cbs.length > 50) { alert('单次最多 50 条'); return; }
@@ -902,7 +943,7 @@ err.textContent = '该视频正在解析中，请稍候…（进度条仍在本�
 }
 
 async function batchAnalyze() {
-  if(!requireLogin()) return;
+  if(!requireAdmin()) return;
   const url = document.getElementById('urlInput').value.trim();
   if (!url) return;
   return analyzePlaylist(url);
@@ -1110,7 +1151,7 @@ function _dlButton(label, url, filename, cls) {
   b.type = 'button';
   b.className = cls || '';
   b.textContent = label;
-  if (!isAdmin()) b.title = '需登录后下载';
+  if (!isMember()) b.title = '需登录后下载';
   b.onclick = () => downloadViaFetch(url, filename, b);
   return b;
 }
@@ -1338,6 +1379,8 @@ function pathShort(p) {
 // ── Init ───────────────────────────
 _applyTheme(localStorage.getItem('scan-theme') || 'auto');
 updateAuthBadge();
+// 异步取一次身份（游客也会拿到 role=guest）：回包后自动修正徽标与管理员专属按钮
+refreshMe();
 loadHistory();
 </script>
 </body>

@@ -7,7 +7,7 @@ import threading
 from datetime import date
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -18,7 +18,8 @@ from src.output.markdown import _OUTPUT_DIR
 from src.rag.chat import ask as rag_ask, global_ask
 from src.web.history import find_in_roots, router as history_router
 from src.web.guest_rules import guest_read_allowed
-from src.web.auth import AuthMiddleware, load_admin_cred
+from src.web.auth import AuthMiddleware, load_accounts
+from src.web.roles import ADMIN, ROLES, member_allowed as _member_allowed, viewer
 from src.output.html_standalone import generate_html_from_history
 from src.web.pipeline import (
     SSE_EVENTS,
@@ -35,19 +36,31 @@ batch_tracker: dict[str, dict] = {}
 
 app = FastAPI(title="Video Analyzer")
 
-_admin_user, _admin_hash = load_admin_cred()
-if not _admin_hash:
-    print("[warn] 管理员哈希未配置（/root/.scan-web-cred 缺少 bcrypt 行）"
+_accounts = load_accounts()
+if not _accounts:
+    print("[warn] 凭据文件无可登录账号（/root/.scan-web-cred 缺 bcrypt 行）"
           "——管理功能不可用（fail closed），游客浏览不受影响")
+else:
+    _roles = ",".join(f"{n}={r}" for n, (_, r) in _accounts.items())
+    print(f"[auth] 已加载 {len(_accounts)} 个账号（角色：{_roles}）")
 
-# 访客模式：游客只读白名单；管理员凭据校验（bcrypt）
+# 三角色：游客只读白名单 / 常规用户（受限登录）/ 管理员（全放行）
 app.add_middleware(
     AuthMiddleware,
-    admin_user=_admin_user or "scanuser",
-    # 哈希从服务器本地凭据文件读，**绝不硬编码**（仓库是公开的，hash 泄漏只能靠轮换密码撤回）
-    admin_hash=_admin_hash,
+    # 账号与 bcrypt 哈希从服务器本地凭据文件读，**绝不硬编码**（仓库公开，hash 泄漏只能靠轮换密码撤回）
+    accounts=_accounts,
     is_read_allowed=guest_read_allowed,
+    # 常规用户白名单：游客白名单 + 解析/问答/下载导出/删自己的（合集、批量、对比除外）
+    member_allowed=lambda method, path: _member_allowed(method, path, guest_read_allowed),
 )
+
+
+@app.get("/api/whoami")
+def whoami(request: Request):
+    """当前身份（前端用它决定按角色显示哪些按钮，替代原先"有凭据=管理员"的二元判断）。"""
+    user, role = viewer(request)
+    return {"user": user, "role": role, "roles": list(ROLES), "admin": role == ADMIN}
+
 
 _static = Path(__file__).parent / "static"
 

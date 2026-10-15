@@ -105,17 +105,16 @@ def skip(label: str, reason: str) -> int:
 
 
 # ── 凭据 ──────────────────────────────────────────────────────
-def load_cred(path: str | None = None) -> tuple[str, str]:
-    """从凭据文件读取 (账号, 密码)。
+def load_accounts(path: str | None = None) -> list[dict]:
+    """把凭据文件解析成 `[{user, pwd, role, hash}]`（多账号格式，见 src/web/auth.load_accounts）。
 
-    支持 `账号:` / `user:` / `username:` 与 `密码:` / `password:` / `pass:` 键名，
-    兼容 `:` 与 `=` 两种分隔符，忽略空行与 `#` 注释。
-    文件缺失或解析不到时返回空串 —— 调用方据此跳过需要鉴权的用例。
+    缺 `角色:` 行的旧文件 → 视为 admin（兼容历史单账号文件）。
     """
-    user = pwd = ""
+    accts: list[dict] = []
     p = Path(path or CRED_FILE)
     if not p.exists():
-        return user, pwd
+        return accts
+    cur: dict | None = None
     for raw in p.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -126,27 +125,58 @@ def load_cred(path: str | None = None) -> tuple[str, str]:
         i = min(idxs)
         key = line[:i].strip().lower()
         val = line[i + 1:].strip()
-        if key in ("账号", "user", "username"):
-            user = val
-        elif key in ("密码", "password", "pass"):
-            pwd = val
-    return user, pwd
+        if key in ("账号", "user", "username", "name"):
+            if cur:
+                accts.append(cur)
+            cur = {"user": val, "pwd": "", "role": "", "hash": ""}
+        if cur is None:
+            continue
+        if key in ("密码", "password", "pass"):
+            cur["pwd"] = val
+        elif key in ("角色", "role"):
+            cur["role"] = val.strip().lower()
+        elif key in ("bcrypt", "hash", "bcrypt_hash", "passhash"):
+            cur["hash"] = val
+    if cur:
+        accts.append(cur)
+    for a in accts:
+        a["role"] = a["role"] or "admin"      # 缺角色行 = admin（旧文件）
+    return accts
 
 
-def basic_auth() -> str:
+def load_cred(path: str | None = None, account: str | None = None) -> tuple[str, str]:
+    """从凭据文件读取 (账号, 密码)。
+
+    **默认取管理员账号**（`角色: admin`；旧文件无角色行同样算 admin），
+    这样文件里新增常规用户账号不会让既有验收用例悄悄降权（曾踩：取"最后一条"会拿到常规用户）。
+    用 `SCAN_CRED_ACCOUNT=<账号>` 可指定别的账号（verify_roles.py 用它取常规用户）。
+    文件缺失或解析不到时返回空串 —— 调用方据此跳过需要鉴权的用例。
+    """
+    accts = load_accounts(path)
+    if not accts:
+        return "", ""
+    want = account or os.environ.get("SCAN_CRED_ACCOUNT", "")
+    if want:
+        hit = next((a for a in accts if a["user"] == want), None)
+    else:
+        hit = next((a for a in accts if a["role"] == "admin"), accts[0])
+    return (hit["user"], hit["pwd"]) if hit else ("", "")
+
+
+def basic_auth(account: str | None = None) -> str:
     """返回 Basic 鉴权头取值；凭据缺失时返回空串。
 
     方案名拆开拼接，避免静态扫描器把整串误报为硬编码凭据。
     """
-    user, pwd = load_cred()
+    user, pwd = load_cred(account=account)
     if not user or not pwd:
         return ""
     token = base64.b64encode(f"{user}:{pwd}".encode()).decode()
     return "Bas" + "ic " + token
 
 
-def have_creds() -> bool:
-    return bool(basic_auth())
+def have_creds(account: str | None = None) -> bool:
+    return bool(basic_auth(account=account))
 
 
 # ── HTTP ──────────────────────────────────────────────────────

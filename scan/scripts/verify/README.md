@@ -39,13 +39,15 @@ SCAN_PYTHON=/path/to/venv/bin/python ./run_all.sh
 | `verify_b1b.py` | #65 B1 | **决定性**：暗号对照（无历史→答不出，有历史→复述） | ✅ |
 | `verify_b4.py` | #67 B4 | 路径穿越（明文/编码）→ 404、正常文件 200、`--with-e2e` 缓存 e2e | ✅ |
 | `verify_thumb.py` | #69 封面/CSP | `https_url` 边界、前端 setThumb 提升 + `no-referrer`、Caddy CSP 白名单、详情接口 thumbnail 无 http | ✅ |
+| `verify_roles.py` | #70 角色/权限 | 凭据多账号解析（旧格式兼容）、`member_allowed` / `can_view_record` 矩阵、前端角色门控、三角色 × 路由 API 实测 | ✅ |
 
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `SCAN_BASE_URL` | `http://127.0.0.1:8787` | 服务地址 |
-| `SCAN_CRED_FILE` | `/root/.scan-web-cred` | 管理员凭据文件（仅读「账号/密码」行） |
+| `SCAN_CRED_FILE` | `/root/.scan-web-cred` | 凭据文件（仅读「账号/密码」行）。**默认取 `角色: admin` 的账号** |
+| `SCAN_CRED_ACCOUNT` | （空） | 指定用哪个账号跑用例（多角色用例用它取常规用户） |
 | `SCAN_TEST_URL` | 某个 B站视频 | 端到端解析用的测试视频 |
 | `SCAN_PYTHON` | 仓库 venv | 运行脚本用的解释器 |
 
