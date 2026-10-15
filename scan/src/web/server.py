@@ -27,9 +27,11 @@ from src.web.pipeline import (
     claim_task,
     make_task_id,
     push,
+    release_task,
     run_pipeline,
     sanitize_task_id,
 )
+from src.web import quota
 
 # Batch task tracking
 batch_tracker: dict[str, dict] = {}
@@ -57,9 +59,16 @@ app.add_middleware(
 
 @app.get("/api/whoami")
 def whoami(request: Request):
-    """当前身份（前端用它决定按角色显示哪些按钮，替代原先"有凭据=管理员"的二元判断）。"""
+    """当前身份（前端用它决定按角色显示哪些按钮，替代原先"有凭据=管理员"的二元判断）。
+
+    附带返回配额概览（阶段 3）：剩余条数、今日已用、在飞任务数。
+    游客拿到的 quota 是空壳（limit=0），不泄露任何账号信息。
+    """
     user, role = viewer(request)
-    return {"user": user, "role": role, "roles": list(ROLES), "admin": role == ADMIN}
+    return {
+        "user": user, "role": role, "roles": list(ROLES), "admin": role == ADMIN,
+        "quota": quota.status(user, role),
+    }
 
 
 _static = Path(__file__).parent / "static"
@@ -168,6 +177,14 @@ async def analyze(request: Request, url: str = Query(...), parent_dir: str = Que
     if not claim_task(task_id):
         # 同一 URL 已在跑：不再覆盖队列、不再起第二条流水线（会双份吃内存 + 两条流互踩）
         raise HTTPException(409, "该视频正在解析中，请稍候（进度条仍在本页显示）")
+
+    # 配额检查放在 claim_task 之后：同一 URL 重复提交应该报 409 而不是吃配额报错。
+    # 失败时要把刚登记的任务释放掉，否则这个 URL 会一直被当成"在跑"。
+    ok, why = quota.reserve(_user, _role)
+    if not ok:
+        release_task(task_id)
+        raise HTTPException(429, why)
+
     SSE_EVENTS[task_id] = queue.Queue()
     threading.Thread(target=asyncio.run, args=(run_pipeline(
         url, task_id, parent_dir=parent_dir, owner=_user, owner_role=_role),), daemon=True).start()

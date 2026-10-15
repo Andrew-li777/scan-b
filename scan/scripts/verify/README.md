@@ -41,6 +41,7 @@ SCAN_PYTHON=/path/to/venv/bin/python ./run_all.sh
 | `verify_thumb.py` | #69 封面/CSP | `https_url` 边界、前端 setThumb 提升 + `no-referrer`、Caddy CSP 白名单、详情接口 thumbnail 无 http | ✅ |
 | `verify_roles.py` | #70 角色/权限 | 凭据多账号解析（旧格式兼容）、`member_allowed` / `can_view_record` 矩阵、前端角色门控、三角色 × 路由 API 实测 | ✅ |
 | `verify_visibility.py` | #71 行级可见性 | 造临时记录（指定 owner）穿 HTTP 层打三角色矩阵：列表过滤 / 详情·导图 404 / 下载 / 导出 / 删除归属 / `meta_for_path` 向上查找 | ✅ |
+| `verify_quota.py` | #72 配额与闸 | 配额账本单元（在飞上限 / 产出计数 / 失败返还 / 用尽文案 / 落盘持久化 / 管理员不限）+ 静态接线 + 线上 whoami quota 字段 | ✅ |
 
 ## 环境变量
 

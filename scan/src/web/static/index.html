@@ -387,10 +387,16 @@ function lockBadge(h){
   return '<span title="只能删除自己解析的记录，管理员可以删除任意记录" style="font-size:0.65rem;color:var(--ink-soft);border:1px solid var(--ink-soft);border-radius:3px;padding:0 4px;margin-left:6px">🔒 不可删</span>';
 }
 function cbAttr(i){ return (isMember() && !canDelete(currentHistory[i])) ? 'disabled title="只能删除自己解析的记录"' : 'title="选择"'; }
+// 常规用户徽标带上今日剩余额度（管理员不限额，不显示）；数据来自 /api/whoami
+function quotaText(){
+  const q = ME.quota;
+  if(q && q.remaining != null) return `已登录 · 常规用户 · 剩 ${q.remaining}`;
+  return '已登录 · 常规用户';
+}
 async function refreshMe(){
   try{
     const r = await fetch('/api/whoami', { headers: _authHeaders() });
-    if(r.ok){ const d = await r.json(); ME = { user: d.user || '', role: d.role || 'guest' }; setRole(ME.role); }
+    if(r.ok){ const d = await r.json(); ME = { user: d.user || '', role: d.role || 'guest', quota: d.quota || null }; setRole(ME.role); }
     else { ME = { user: '', role: 'guest' }; setRole('guest'); }
   }catch(e){ /* 网络异常：保持缓存角色，不清登录态 */ }
   updateAuthBadge();
@@ -401,9 +407,9 @@ function updateAuthBadge(){
   if(!badge) return;
   const r = getRole();
   if(r === 'admin' || r === 'user'){
-    badge.textContent = r === 'admin' ? '已登录 · 管理员' : '已登录 · 常规用户';
+    badge.textContent = r === 'admin' ? '已登录 · 管理员' : quotaText();
     badge.className = 'kicker ' + (r === 'admin' ? 'auth-admin' : 'auth-user');
-    badge.onclick = null; badge.title = ME.user ? ('账号：' + ME.user) : '';
+    badge.onclick = null; badge.title = ME.user ? ('账号：' + ME.user + (ME.quota && ME.quota.limit != null ? `｜今日已用 ${ME.quota.used}/${ME.quota.limit}` : '')) : '';
     if(btn) btn.style.display = 'none';
     if(lo) lo.style.display = 'inline-block';
   } else {
@@ -890,6 +896,18 @@ err.textContent = '该视频正在解析中，请稍候…（进度条仍在本�
       err.style.display = 'block';
       btn.disabled = false;
       document.getElementById('cancelBtn').style.display = 'none';
+      return;
+    }
+    if (r.status === 429) {
+      /* 配额/在飞超限（阶段 3）：后端把原因写在 detail 里，原样展示给用户 */
+      let msg = '配额已用完或已有任务在解析，请稍后再试';
+      try { const d = await r.json(); if (d && d.detail) msg = d.detail; } catch(e){}
+      err.textContent = msg;
+      err.style.display = 'block';
+      btn.disabled = false;
+      document.getElementById('cancelBtn').style.display = 'none';
+      document.getElementById('statusLine').textContent = '';
+      refreshMe();   // 顺带把徽标上的剩余额度刷新到最新
       return;
     }
     const { task_id } = await r.json();

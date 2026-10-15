@@ -49,6 +49,28 @@ _CACHE_TTL_SECONDS = 7 * 24 * 3600
 # 只串行化「无字幕 → whisper 转录」这一段；有字幕的视频走平台字幕，不受影响。
 _TRANSCRIBE_GATE = threading.BoundedSemaphore(max(1, int(settings.max_concurrent_transcribe or 1)))
 
+# 全局流水线闸（2026-10-15）：限制**同时在跑的完整流水线**条数。
+# 转录闸只管"无字幕→whisper"那一段，挡不住两条有字幕视频各自跑下载+LLM+嵌入；
+# 而内存账是：常驻 2.0GB + 每条峰值 ~1.3GB，物理只有 3.9GB ⇒ 2 条就已 4.6GB。
+# 所以另设一道全局闸（默认 2），超出的任务在闸外**排队**并把状态推给前端。
+_PIPELINE_GATE = threading.BoundedSemaphore(max(1, int(settings.max_concurrent_pipeline or 1)))
+
+
+async def _acquire_pipeline_gate(task_id: str, cancel_event: threading.Event) -> bool:
+    """取全局流水线闸；排队期间可被取消。返回 False = 等待期间被取消。
+
+    用 `asyncio.to_thread` 包住阻塞式 acquire：直接 acquire 会把 uvicorn 事件循环
+    卡住（所有 SSE 进度流一起停顿，前端看起来像"卡死"）。
+    """
+    if _PIPELINE_GATE.acquire(blocking=False):
+        return True
+    limit = int(settings.max_concurrent_pipeline or 1)
+    push(task_id, "status", f"排队中：已有 {limit} 条解析在跑（避免内存溢出），马上开始...")
+    while not await asyncio.to_thread(_PIPELINE_GATE.acquire, True, 2.0):
+        if cancel_event.is_set():
+            return False
+    return True
+
 
 def _acquire_transcribe_gate(task_id: str, cancel_event: threading.Event) -> bool:
     """取得转录闸（轮询等待以便响应取消）。返回 False = 等待期间被取消。"""
@@ -130,6 +152,8 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "",
     cancel_event = threading.Event()
     _running_tasks[task_id] = cancel_event
     audio_path = None
+    produced = False      # 真正写出记录才置 True → 配额按"实际产出"计（失败返还）
+    got_gate = False      # 只在自己取到闸时才释放，避免多放导致闸失效
     try:
         if cancel_event.is_set():
             push(task_id, "error", "任务已取消")
@@ -137,7 +161,7 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "",
 
         # 缓存命中：同一 URL（task_id 由 URL 派生）直接回放上次结果，
         # 省掉下载/转录/LLM/嵌入全流程。旧代码只有 cache.set 没有 cache.get，
-        # 缓存写进去从来没人读。
+        # 缓存写进去从来没人读。缓存回放**不占闸、不计配额**（没有产出新记录）。
         try:
             hit = cache.get(task_id)
         except Exception:
@@ -146,6 +170,12 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "",
             push(task_id, "status", "命中本地缓存，直接返回上次解析结果")
             push(task_id, "done", json.dumps(hit))
             return True
+
+        # 全局流水线闸：超出并发上限的任务在这里排队（内存保护的关键一层）
+        if not await _acquire_pipeline_gate(task_id, cancel_event):
+            push(task_id, "error", "任务已取消")
+            return False
+        got_gate = True
 
         push(task_id, "status", "提取字幕中...")
         extractor = get_extractor(url)
@@ -311,6 +341,8 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "",
                 pass
         (_OUTPUT_DIR / base_name / "meta.json").write_text(
             json.dumps(_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 记录已落盘 → 这一次才算"实际产出"（配额 +1；失败/取消都不算）
+        produced = True
 
         # RAG 检索标识：一律由 URL 派生（见 src/rag/ids.py），不用运行时 task_id ——
         # 批量/分P 的 task_id 是随机 UUID，页面刷新后无从复现，历史记录会永远找不到自己的索引。
@@ -378,6 +410,15 @@ async def run_pipeline(url: str, task_id: str, parent_dir: str = "",
     finally:
         _running_tasks.pop(task_id, None)
         release_task(task_id)
+        if got_gate:
+            _PIPELINE_GATE.release()
+        # 配额结算：释放该账号的"在飞"名额；只有真产出记录才计一条。
+        # 放在 finally 里 → 无论成功、异常、取消都会还名额（失败返还）。
+        try:
+            from src.web import quota
+            quota.settle(owner, produced)
+        except Exception:
+            pass
         if audio_path:
             try:
                 await asyncio.to_thread(cleanup_audio, audio_path)

@@ -36,6 +36,17 @@ class Settings(BaseSettings):
     # 且 RAG 常驻后余量更小。串行化"无字幕视频"的转录阶段；有字幕的视频不受限。
     max_concurrent_transcribe: int = 1
 
+    # 全局流水线闸：同时在跑的**完整解析流水线**上限（含下载/转录/LLM/嵌入）。
+    # 本机 3.9GB 物理内存，scan 常驻 ~2.0GB，无字幕视频单条峰值再 +1.3GB ≈ 3.3/3.9GB；
+    # 两条并行就是 4.6GB > 3.9GB ⇒ 必然 OOM。转录闸挡不住"有字幕视频"的并行，
+    # 所以必须有这一层全局闸（用户 2026-10-15 拍板：闸 = 2）。
+    max_concurrent_pipeline: int = 2
+
+    # --- 常规用户配额（2026-10-15：D2=(b)，日配额 100 条）---
+    user_daily_quota: int = 100      # 条/天，按**实际产出记录数**计；失败/取消/缓存回放不计
+    user_inflight_limit: int = 2     # 每账号同时在飞的解析任务上限（并发，与日配额是两件事）
+    quota_file: str = "data/quota.json"   # 账本落盘（相对 PROJECT_ROOT）
+
     # --- 离线化配置（P0：启动零外网） ---
     model_dir: str = "models"                      # 本地模型根目录（相对 PROJECT_ROOT 或绝对路径）
     embedding_model: str = "bge-m3"                # 向量嵌入模型子目录名

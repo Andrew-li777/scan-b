@@ -191,12 +191,22 @@ def service_reachable(timeout: int = 3) -> bool:
         return False
 
 
-def http(path: str, method: str = "GET", auth: bool = True,
+def http(path: str, method: str = "GET", auth: bool | str = True,
          timeout: int = 60):
-    """发起请求，返回 (status, body_bytes)；HTTP 错误也返回状态码而非抛异常。"""
+    """发起请求，返回 (status, body_bytes)；HTTP 错误也返回状态码而非抛异常。
+
+    auth 三态：
+      - `True`（默认）→ 用**管理员**账号（load_cred 默认取 admin）
+      - 账号名字符串   → 用该账号（多角色用例需要，如 `auth="alice"`）
+      - `False`        → 不带鉴权头（游客）
+    """
     headers = {}
-    if auth:
+    if auth is True:
         a = basic_auth()
+        if a:
+            headers["Authorization"] = a
+    elif isinstance(auth, str) and auth:
+        a = basic_auth(account=auth)
         if a:
             headers["Authorization"] = a
     req = urllib.request.Request(f"{BASE}{path}", method=method, headers=headers)
