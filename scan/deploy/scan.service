@@ -1,0 +1,32 @@
+[Unit]
+Description=scan-b Video Analyzer (FastAPI + faster-whisper)
+Documentation=https://github.com/zoneby-Alex/scan-b
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/scan-b/scan
+ExecStart=/root/scan-b/venv/bin/python /root/scan-b/scan/run_server.py
+Restart=on-failure
+RestartSec=5
+# 内存硬限（2026-10-15 内存治理）
+# 物理内存 3.9GB；本服务常驻 ~0.6GB（嵌入模型已换 bge-small-zh-v1.5，原 bge-m3 是 2.2GB）
+# + 单条解析峰值 ~1.3GB（whisper），全局流水线闸=2 且转录串行 ⇒ 最坏约 2.0GB。
+# 设 2.5G 的**唯一目的**是"只杀自己"：超限时由本 cgroup OOM 杀本服务，
+# 而不是让内核按 oom_score 全局乱杀（历史上真杀过 hermes-gateway）。
+# 所以这个值必须**显著小于物理内存** —— 原来的 MemoryMax=4G 对 3.9GB 物理内存
+# 等于没设，触顶时是整机级 OOM，服务反而杀不掉、连带把别的进程拖死。
+MemoryMax=2500M
+# 软限：先压制（回收页缓存）而不是直接杀，给服务一个自我消化压力的区间。
+MemoryHigh=2G
+# 同限交换：只设 MemoryMax 的话，超限部分会去啃 2GB swap，整机进入抖动 ——
+# 表现为"进程活着但慢到不可用"，比被杀更难查。512M 只留一点缓冲。
+MemorySwapMax=512M
+# 避免 core dump（core 文件本身可能几百 MB，落盘又会拖慢）
+LimitCORE=0
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

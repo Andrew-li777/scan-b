@@ -58,11 +58,23 @@ MODELS = {
         "weights": ["model.safetensors", "pytorch_model.bin"],
         "ignore": ["onnx/*", "*.onnx", "*.ot", "*.h5", "*.msgpack", "flax_model.msgpack", "imgs/*", ".DS_Store"],
     },
+    # 轻量中文嵌入（2026-10-15，内存治理）：512 维，权重 ~95MB，
+    # 常驻约 0.1–0.2GB（bge-m3 是 2.2GB）—— 3.9GB 小内存机器上换它把常驻从 2.0GB 压到 ~0.9GB。
+    # 代价：召回质量略降（1024→512 维），故保留 bge-m3 目录不删，回滚只需改 .env 两行 + 重建索引。
+    "bge-small-zh-v1.5": {
+        "dir": "bge-small-zh-v1.5",
+        "modelscope": "BAAI/bge-small-zh-v1.5",
+        "hf_mirror": "BAAI/bge-small-zh-v1.5",
+        "key_files": ["config.json", "tokenizer.json"],   # 缺 tokenizer 会加载失败，必须校验
+        "weights": ["model.safetensors", "pytorch_model.bin"],
+        "ignore": ["onnx/*", "*.onnx", "*.ot", "*.h5", "*.msgpack", "flax_model.msgpack", "imgs/*", ".DS_Store"],
+    },
 }
 
 GROUPS = {
     "whisper": ["whisper-small"],
     "embedding": ["bge-m3"],
+    "embedding-small": ["bge-small-zh-v1.5"],
     "reranker": ["bge-reranker-v2-m3"],
 }
 
@@ -165,6 +177,7 @@ def main() -> int:
     parser.add_argument("--all", action="store_true", help="下载全部模型")
     parser.add_argument("--whisper", action="store_true", help="下载 Whisper 模型")
     parser.add_argument("--embedding", action="store_true", help="下载 bge-m3 嵌入模型")
+    parser.add_argument("--embedding-small", action="store_true", help="下载 bge-small-zh-v1.5 轻量嵌入模型（512 维，省内存）")
     parser.add_argument("--reranker", action="store_true", help="下载 bge-reranker 重排模型")
     args = parser.parse_args()
 
@@ -172,7 +185,8 @@ def main() -> int:
     if args.all:
         names = list(MODELS.keys())
     else:
-        for flag, group in (("whisper", "whisper"), ("embedding", "embedding"), ("reranker", "reranker")):
+        for flag, group in (("whisper", "whisper"), ("embedding", "embedding"),
+                            ("embedding_small", "embedding-small"), ("reranker", "reranker")):
             if getattr(args, flag):
                 names += GROUPS[group]
     if not names:

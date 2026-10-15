@@ -28,6 +28,9 @@ Thumbs.db
 # Runtime data
 .cache/
 .chromadb/
+# 换嵌入模型时重建索引留下的备份（改名备份，故意不删）—— 属运行时产物，
+# 且一份就 35MB，绝不能进仓库。正式备份放 /root/scan-b-backups/。
+.chromadb.bak-*
 /output/
 tempvideo/
 

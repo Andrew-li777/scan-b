@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sys
 import urllib.error
@@ -192,13 +193,17 @@ def service_reachable(timeout: int = 3) -> bool:
 
 
 def http(path: str, method: str = "GET", auth: bool | str = True,
-         timeout: int = 60):
+         timeout: int = 60, body: bytes | None = None,
+         json_body: dict | None = None):
     """发起请求，返回 (status, body_bytes)；HTTP 错误也返回状态码而非抛异常。
 
     auth 三态：
       - `True`（默认）→ 用**管理员**账号（load_cred 默认取 admin）
       - 账号名字符串   → 用该账号（多角色用例需要，如 `auth="alice"`）
       - `False`        → 不带鉴权头（游客）
+
+    请求体二选一：`body=<bytes>`（原始）或 `json_body=<dict>`（自动加 Content-Type）。
+    连不上（非 HTTP 错误，如拒绝连接）返回 `(0, b"")`，让调用方自己判定，不炸栈。
     """
     headers = {}
     if auth is True:
@@ -209,12 +214,17 @@ def http(path: str, method: str = "GET", auth: bool | str = True,
         a = basic_auth(account=auth)
         if a:
             headers["Authorization"] = a
-    req = urllib.request.Request(f"{BASE}{path}", method=method, headers=headers)
+    if json_body is not None:
+        body = json.dumps(json_body).encode()
+        headers.setdefault("Content-Type", "application/json")
+    req = urllib.request.Request(f"{BASE}{path}", method=method, headers=headers, data=body)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
+    except Exception:
+        return 0, b""
 
 
 # ── 历史记录样本发现（不硬编码具体记录名）─────────────────────
