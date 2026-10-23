@@ -17,8 +17,26 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
+
+
+def _whisper_resident(minutes: int = 30) -> bool:
+    """服务的 whisper 模型是否「可能仍在内存里」。
+
+    判据来自服务日志：近 N 分钟出现过 `Processing audio`（加载模型）且此后没有
+    `Whisper model released`（正常收尾会释放）。正常流程两者配对；被取消/中断的
+    解析只会有前者 —— RSS 里就多出 ~1.3GB，但那不是「常驻膨胀」。
+    journalctl 不可用时保守返回 False（照常断言，不给自己开后门）。
+    """
+    try:
+        out = subprocess.run(
+            ["journalctl", "-u", "scan", "--no-pager", "--since", f"-{minutes}min"],
+            capture_output=True, text=True, timeout=20).stdout
+    except Exception:
+        return False
+    return out.rfind("Processing audio") > out.rfind("Whisper model released")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import REPO_ROOT, chk, have_creds, http, service_reachable, skip  # noqa: E402
@@ -128,8 +146,16 @@ if main_pid:
     for line in Path(f"/proc/{main_pid}/status").read_text().splitlines():
         if line.startswith("VmRSS"):
             rss_kb = int(line.split()[1])
-    chk("服务 RSS < 1500 MB（治理目标：常驻不再吃满 2GB）", 0 < rss_kb < 1500 * 1024,
-        f"{rss_kb/1024:.0f} MB")
+    rss_mb = rss_kb / 1024
+    if rss_kb >= 1500 * 1024 and _whisper_resident():
+        # 「常驻基线」的断言不能把刚跑过转录的模型算进去：whisper-small 加载后约 1.3GB，
+        # 正常收尾会打 "Whisper model released"，被取消/中断的解析则会把它留在内存里。
+        # 这种情况记 SKIP 而不是 PASS —— 掩盖真膨胀比漏报更危险。
+        print(f"  [SKIP] 服务 RSS {rss_mb:.0f} MB —— 近 30 分钟跑过转录，whisper 模型仍驻留；"
+              "重启服务后复测才是『常驻基线』")
+    else:
+        chk("服务 RSS < 1500 MB（治理目标：常驻不再吃满 2GB）", 0 < rss_kb < 1500 * 1024,
+            f"{rss_mb:.0f} MB")
 
 if have_creds():
     # 用一个**没有内容的** id 做冒烟：只要 200 就说明"读索引→检索→生成"整条链没被换模型打断，

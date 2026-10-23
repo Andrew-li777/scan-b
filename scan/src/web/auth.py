@@ -37,10 +37,12 @@
 游客浏览不受影响。
 """
 import base64
+import hashlib
 import hmac
 import os
+import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from pathlib import Path
 from typing import Callable
 
@@ -53,6 +55,40 @@ try:
     import bcrypt
 except ImportError:  # pragma: no cover
     bcrypt = None
+
+
+# ── 校验结果缓存：bcrypt($2a$14$) 单次 ≈ 1.2 秒，而浏览器切一条记录要发 3+ 个带凭据的
+# 请求 —— 不缓存就是每条记录白白多等 3.6 秒（实测：游客 1ms / 登录 1182ms，同一端点）。
+# 键里带「密码的 sha256」和「存储哈希的前 12 位」：
+#   * 不存明文密码；
+#   * 换密码 → 摘要变 → 自然不复用旧记录；
+#   * 轮换同一密码的哈希（比如调 cost）→ 存储哈希变 → 也立刻失效。
+# 只缓存**校验成功**的结果，所以攻击者无法用错误密码把缓存打满；仍然设上限兜底。
+_VERIFIED: "OrderedDict[tuple[str, str, str], tuple[str, str]]" = OrderedDict()
+_VERIFIED_LOCK = threading.Lock()
+_VERIFIED_MAX = 256
+
+
+def _cache_get(key):
+    with _VERIFIED_LOCK:
+        hit = _VERIFIED.get(key)
+        if hit is not None:
+            _VERIFIED.move_to_end(key)
+        return hit
+
+
+def _cache_put(key, value):
+    with _VERIFIED_LOCK:
+        _VERIFIED[key] = value
+        _VERIFIED.move_to_end(key)
+        while len(_VERIFIED) > _VERIFIED_MAX:
+            _VERIFIED.popitem(last=False)
+
+
+def _cache_clear() -> None:
+    """测试/轮换凭据后用：清空缓存（服务重启也会清）。"""
+    with _VERIFIED_LOCK:
+        _VERIFIED.clear()
 
 
 def verify_credentials(
@@ -89,11 +125,18 @@ def verify_credentials(
         return None
 
     name, stored = hit
+    # 命中缓存 → 免掉 1.2 秒的 bcrypt（键含密码摘要 + 存储哈希指纹，改密码/换哈希都会失效）
+    digest = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    ckey = (name, stored[:12], digest)
+    cached = _cache_get(ckey)
+
     if bcrypt is None:
         try:
             ok = hmac.compare_digest(password.encode("utf-8"), stored.encode("utf-8"))
         except Exception:
             ok = False
+    elif cached is not None:
+        ok = True
     else:
         try:
             ok = bcrypt.checkpw(password.encode("utf-8"), stored.encode("utf-8"))
@@ -108,6 +151,8 @@ def verify_credentials(
     # 游客身份不能由凭据文件授予（否则等于"有账号但无权限"的第三种怪状态）
     if role == GUEST:
         role = USER
+    if cached is None:
+        _cache_put(ckey, (name, role))
     return name, role
 
 

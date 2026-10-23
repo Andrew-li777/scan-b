@@ -511,6 +511,15 @@ let currentMindmap = '';
 let currentVideoUrl = '';
 let currentPlatform = '';
 let currentHistory = [];
+/* ── 字幕懒加载状态（详情接口不再默认带字幕：一条长视频的 subtitles.md 能占详情
+   体积的 3/4，而切记录时用户先看的是概览/重点）──
+   currentSubtitlesState: 'none' 无字幕 | 'idle' 可加载/还有下一页 | 'loading' | 'done' 全拉完 */
+let currentBaseName = '';
+let currentSubtitleTotal = 0;
+let currentSubtitlesLoaded = 0;
+let currentTranslated = false;
+let currentSubtitlesState = 'none';
+const SUB_PAGE = 300;   // 每页条数（≈8KB）
 
 function videoUrl(platform, url, seconds) {
   if (!url) return '#';
@@ -798,8 +807,8 @@ function showHistory(idx) {
   hideBar('downloadBar');
   hideBar('transcribeBar');
 
-  // Fetch full content
-  authFetch(`/api/history/${encodeURIComponent(h.base_name)}`)
+  // Fetch full content（不带字幕：字幕走 switchTab('subtitles') 时按需分页拉）
+  authFetch(`/api/history/${encodeURIComponent(h.base_name)}?subtitles=0`)
     .then(r => { if (!r.ok) throw new Error('加载失败'); return r.json(); })
     .then(async d => {
       document.getElementById('title').textContent = d.title || h.title;
@@ -819,6 +828,10 @@ function showHistory(idx) {
 
       // Render tabs
       const isTranslated = d.translated || false;
+      // 记下这条记录的字幕上下文：分页请求要靠 base_name，条数用来「加载更多」
+      currentBaseName = h.base_name;
+      currentTranslated = isTranslated;
+      currentSubtitleTotal = d.subtitle_count || 0;
       if (d.keypoints && d.keypoints.length) {
         renderKeypoints(d.keypoints, isTranslated);
       } else {
@@ -826,7 +839,17 @@ function showHistory(idx) {
       }
       if (d.subtitles && d.subtitles.length) {
         renderSubtitles(d.subtitles, isTranslated);
+      } else if (d.subtitle_count) {
+        // 懒加载：先给占位，切到「完整字幕」标签时再拉第一页
+        currentSubtitles = [];
+        currentSubtitlesLoaded = 0;
+        currentSubtitlesState = 'idle';
+        document.getElementById('tab-subtitles').innerHTML =
+          `<p style="color:var(--muted)">共 ${d.subtitle_count} 条字幕，切到「完整字幕」标签时加载</p>`;
       } else {
+        currentSubtitles = [];
+        currentSubtitlesLoaded = 0;
+        currentSubtitlesState = 'none';
         document.getElementById('tab-subtitles').innerHTML = '<p style="color:var(--muted)">暂无字幕</p>';
       }
       if (d.overview) {
@@ -929,6 +952,12 @@ err.textContent = '该视频正在解析中，请稍候…（进度条仍在本�
       currentMindmap = d.mindmap || '';
       currentVideoUrl = d.url || '';
       currentPlatform = d.platform || '';
+      // 刚解析完是「字幕全在手上」，直接置为 done，别让「加载更多」按钮误出现
+      currentBaseName = d.base_name || '';
+      currentSubtitleTotal = currentSubtitles.length;
+      currentSubtitlesLoaded = currentSubtitles.length;
+      currentSubtitlesState = currentSubtitles.length ? 'done' : 'none';
+      currentTranslated = d.translated || false;
       chatHistory = [];
       /* 单条解析时 task_id 本身通常就是 BV 号；批量/分P 解析给的是随机 UUID，
          done 事件若带了记录级 rag id（由 URL 派生），优先采用它，保证与补索引同名。 */
@@ -1084,16 +1113,57 @@ function _subtitleLink(line) {
   }
   return esc(line);
 }
+/* 字幕分页加载：一次 300 条（≈8KB），「加载更多」追加。
+   ⚠️ 必须用 query 参数而不是 /api/history/{base}/subtitles 子路径 ——
+   后端的 {base_name:path} 是贪婪匹配，会把 "subtitles" 吞进路径拼成不存在的目录。 */
+async function loadSubtitles(reset) {
+  if (currentSubtitlesState === 'loading') return;
+  if (!currentBaseName) return;
+  if (reset) { currentSubtitles = []; currentSubtitlesLoaded = 0; }
+  if (currentSubtitlesState === 'done' && !reset) return;
+  currentSubtitlesState = 'loading';
+  const el = document.getElementById('tab-subtitles');
+  if (!currentSubtitlesLoaded) el.innerHTML = '<p style="color:var(--muted)">加载字幕…</p>';
+  try {
+    const r = await authFetch(
+      `/api/history/${encodeURIComponent(currentBaseName)}?subtitles=1&offset=${currentSubtitlesLoaded}&limit=${SUB_PAGE}`);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    const lines = d.subtitles || [];
+    if (typeof d.subtitle_count === 'number') currentSubtitleTotal = d.subtitle_count;
+    if (d.translated) currentTranslated = true;
+    currentSubtitles = currentSubtitles.concat(lines);
+    currentSubtitlesLoaded = currentSubtitles.length;
+    currentSubtitlesState = (currentSubtitlesLoaded < currentSubtitleTotal) ? 'idle' : 'done';
+    if (!lines.length && !currentSubtitlesLoaded) {
+      currentSubtitlesState = 'none';
+      el.innerHTML = '<p style="color:var(--muted)">暂无字幕</p>';
+      return;
+    }
+    renderSubtitles(currentSubtitles, currentTranslated);
+  } catch (e) {
+    currentSubtitlesState = 'idle';
+    el.innerHTML = `<p style="color:var(--danger)">字幕加载失败：${esc(e.message)}
+      <a href="javascript:void 0" onclick="loadSubtitles(true)" style="color:var(--accent)">重试</a></p>`;
+  }
+}
 function renderSubtitles(lines, translated) {
   const el = document.getElementById('tab-subtitles');
   if (!lines.length) { el.innerHTML = '<p style="color:var(--muted)">暂未加载</p>'; return; }
-  el.innerHTML = lines.map(l => {
+  let html = lines.map(l => {
     if (translated && l.includes('\n')) {
       const [orig, zh] = l.split('\n');
       return `<p style="margin:4px 0;font-size:0.9rem"><span style="color:var(--text)">${_subtitleLink(orig)}</span><br><span style="color:var(--muted);font-size:0.82rem;padding-left:8px">${esc(zh)}</span></p>`;
     }
     return `<p style="margin:4px 0;font-size:0.9rem;color:var(--muted)">${_subtitleLink(l)}</p>`;
   }).join('');
+  if (currentSubtitlesState === 'idle' && currentSubtitlesLoaded < currentSubtitleTotal) {
+    html += `<p style="margin:14px 0"><button type="button" class="export-btn"
+      onclick="loadSubtitles(false)">加载更多字幕（已显示 ${currentSubtitlesLoaded} / ${currentSubtitleTotal}）</button></p>`;
+  } else if (currentSubtitlesState === 'done' && currentSubtitleTotal > SUB_PAGE) {
+    html += `<p style="color:var(--muted);margin:14px 0">已全部加载，共 ${currentSubtitleTotal} 条</p>`;
+  }
+  el.innerHTML = html;
 }
 function renderOverview(text) {
   const el = document.getElementById('tab-overview');
@@ -1225,6 +1295,8 @@ function switchTab(name) {
         '<p style="color:var(--muted)">思维导图组件加载失败，请刷新重试</p>';
     });
   }
+  // 字幕懒加载：同构写法 —— 首次打开该标签页时才向后端要正文
+  if (name === 'subtitles' && currentSubtitlesState === 'idle') loadSubtitles(false);
 }
 
 // ── Chat ───────────────────────────

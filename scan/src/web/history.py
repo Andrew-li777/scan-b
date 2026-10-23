@@ -1,10 +1,11 @@
+import hashlib
 import json
 import logging
 import os
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from src.cache import cache
@@ -172,8 +173,17 @@ def _parse_timestamp(ts: str) -> int:
     return 0
 
 
-def _load_detail(base_name: str) -> dict | None:
-    """Load full detail data for a history record. Returns None if the folder doesn't exist."""
+def _load_detail(base_name: str, *, with_subtitles: bool = True,
+                 offset: int = 0, limit: int = 0) -> dict | None:
+    """Load full detail data for a history record. Returns None if the folder doesn't exist.
+
+    字幕是详情里唯一的「大块头」（一条长视频的 subtitles.md 可达几十 KB，占整个
+    详情 JSON 的 3/4）。所以这里把「解析」和「回传」拆开：
+      * **总是解析** —— 必须准确回答 `subtitle_count` 和 `translated`，服务端读 33KB
+        文本是毫秒级，瓶颈在 1Mbps 出网，省字节比省 CPU 有意义；
+      * **按需回传** —— `with_subtitles=False` 时只给条数不给正文；给了 `limit`
+        就只回 `[offset, offset+limit)` 这一段。
+    """
     folder = _resolve_folder(base_name)
     if folder is None:
         return None
@@ -236,6 +246,7 @@ def _load_detail(base_name: str) -> dict | None:
         result["keypoints"] = _parse_keypoints_md(text)
 
     # Parse subtitles (merge timestamped line with following translation line if present)
+    sub_all: list[str] = []
     sub = folder / "subtitles.md"
     if sub.exists():
         text = sub.read_text(encoding="utf-8", errors="replace")
@@ -252,8 +263,20 @@ def _load_detail(base_name: str) -> dict | None:
                     if nxt and not ts_re.match(nxt):
                         zh = nxt
                         i += 1
-                result["subtitles"].append(line + ("\n" + zh if zh else ""))
+                sub_all.append(line + ("\n" + zh if zh else ""))
             i += 1
+
+    total = len(sub_all)
+    if with_subtitles:
+        lo = max(0, min(offset, total))
+        hi = total if limit <= 0 else min(total, lo + max(0, limit))
+        result["subtitles"] = sub_all[lo:hi]
+    else:
+        lo, hi = 0, 0
+        result["subtitles"] = []
+    result["subtitle_count"] = total          # 总条数（不受分页影响）
+    result["subtitle_offset"] = lo            # 本段起始下标
+    result["has_more_subtitles"] = hi < total  # 还有没拉的
 
     mm = folder / "mindmap.md"
     if mm.exists():
@@ -263,7 +286,7 @@ def _load_detail(base_name: str) -> dict | None:
         else:
             result["mindmap"] = text.strip()
 
-    result["translated"] = any("\n" in s for s in result["subtitles"])
+    result["translated"] = any("\n" in s for s in sub_all)
     result["rag"] = _rag_ids(result.get("url", ""))
 
     return result
@@ -454,13 +477,55 @@ def batch_delete(request: Request, req: BatchDeleteRequest):
     return {"deleted": deleted, "failed": failed}
 
 
+def _detail_etag(folder: Path, extra: str = "") -> str:
+    """详情响应指纹 = 记录目录里各 md 的 (mtime, size) + 角色/分页参数。
+
+    用 mtime+size 而不是内容哈希：读者要的是「这份文件没变」，而 stat 是 O(1)，
+    对一个 33KB 的 subtitles.md 也省掉一次全量读取。角色进指纹是防止
+    「管理员看过的 304 被游客复用」这类跨身份缓存串味。
+    """
+    parts = []
+    for name in ("meta.json", "overview.md", "keypoints.md", "mindmap.md", "subtitles.md"):
+        p = folder / name
+        try:
+            st = p.stat()
+            parts.append(f"{name}:{int(st.st_mtime)}:{st.st_size}")
+        except OSError:
+            parts.append(f"{name}:-")
+    parts.append(extra)
+    return '"' + hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:24] + '"'
+
+
 @router.get("/api/history/{base_name:path}")
-def history_detail(request: Request, base_name: str):
-    detail = _load_detail(base_name)
+def history_detail(request: Request, base_name: str, response: Response,
+                   subtitles: int = 1, offset: int = 0, limit: int = 0):
+    """记录详情。
+
+    字幕参数（默认全量，保持老前端/脚本兼容）：
+      ?subtitles=0                    只回条数，不回正文（新前端首屏用）
+      ?subtitles=1&offset=&limit=     分页取字幕
+    ⚠️ 不能用 `/api/history/{base}/subtitles` 这种子路径 —— `{base_name:path}`
+    是贪婪匹配，会把 `subtitles` 一起吞进 base_name，直接 404。
+    """
+    folder = _resolve_folder(base_name)
+    if folder is None:
+        raise HTTPException(404, "记录不存在")
+    detail = _load_detail(base_name, with_subtitles=bool(subtitles),
+                          offset=offset, limit=limit)
     if detail is None:
         raise HTTPException(404, "记录不存在")
     _user, role = _viewer_of(request)
     if not can_view_record(role, detail):
         # 不可见 = 不存在（404，不是 403）——403 等于承认"这条记录存在但不给你看"
         raise HTTPException(404, "记录不存在")
+
+    etag = _detail_etag(folder, f"{role}|{int(bool(subtitles))}|{offset}|{limit}")
+    # If-None-Match 可能是逗号列表、可能带 W/ 前缀（反向代理会降级为弱校验），都要认
+    inm = request.headers.get("if-none-match", "")
+    if inm and (inm.strip() == "*" or etag in {t.strip().removeprefix("W/").strip() for t in inm.split(",")}):
+        return Response(status_code=304, headers={"ETag": etag})
+    response.headers["ETag"] = etag
+    # private：内容跟身份有关，绝不能让 CF/中间代理共享缓存；no-cache 仍允许本地
+    # 保存副本，但每次用前必须回源校验（命中就是 304，省掉正文那几个 KB）。
+    response.headers["Cache-Control"] = "private, no-cache"
     return detail
