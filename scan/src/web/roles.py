@@ -67,6 +67,7 @@ _USER_POST_PREFIXES = (
     # 批量删除：**允许**，但路由层只删得掉自己的记录（别人的进 failed 列表）——
     # 界面上的删除入口只有批量这一个，若此处禁掉常规用户就等于"不能删自己的"
     "/api/history/batch_delete",
+    "/api/logout",         # 退出登录（删会话 cookie）
 )
 _USER_GET_PREFIXES = (
     "/api/chat/global",    # 全局问答

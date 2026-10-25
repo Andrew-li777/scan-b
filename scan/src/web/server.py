@@ -18,7 +18,7 @@ from src.output.markdown import _OUTPUT_DIR
 from src.rag.chat import ask as rag_ask, global_ask
 from src.web.history import find_in_roots, visible_for_role, router as history_router
 from src.web.guest_rules import guest_read_allowed
-from src.web.auth import AuthMiddleware, load_accounts
+from src.web.auth import AuthMiddleware, load_accounts, load_session_secret
 from src.web.roles import ADMIN, GUEST, ROLES, USER, can_view_record, member_allowed as _member_allowed, viewer
 from src.output.html_standalone import generate_html_from_history
 from src.web.pipeline import (
@@ -47,6 +47,12 @@ else:
     print(f"[auth] 已加载 {len(_accounts)} 个账号（角色：{_roles}）")
 
 # 三角色：游客只读白名单 / 常规用户（受限登录）/ 管理员（全放行）
+# 会话签名密钥从服务器本地文件读（600）；缺失时自动生成，失败则不签发 cookie（退回 Basic）
+_session_secret = load_session_secret()
+if _session_secret is None:
+    print("[warn] 会话密钥不可用（/root/.scanweb-sess 读写失败）——仅 Basic 鉴权，"
+          "重启后首个请求仍会慢一次")
+
 app.add_middleware(
     AuthMiddleware,
     # 账号与 bcrypt 哈希从服务器本地凭据文件读，**绝不硬编码**（仓库公开，hash 泄漏只能靠轮换密码撤回）
@@ -54,7 +60,16 @@ app.add_middleware(
     is_read_allowed=guest_read_allowed,
     # 常规用户白名单：游客白名单 + 解析/问答/下载导出/删自己的（合集、批量、对比除外）
     member_allowed=lambda method, path: _member_allowed(method, path, guest_read_allowed),
+    session_secret=_session_secret,
 )
+
+
+@app.post("/api/logout")
+def logout():
+    """退出：清掉会话 cookie（token 无状态，只能靠删 cookie + 过期失效）。"""
+    resp = Response(status_code=200, content='{"ok":true}', media_type="application/json")
+    resp.delete_cookie("scan_sess", path="/")
+    return resp
 
 
 @app.get("/api/whoami")

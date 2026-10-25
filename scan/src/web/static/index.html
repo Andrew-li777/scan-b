@@ -369,6 +369,12 @@ function setTheme(t) {
 const AUTH_KEY = 'scan-basic-auth';
 function getAuth(){ try{ return localStorage.getItem(AUTH_KEY) || ''; }catch(e){ return ''; } }
 function setAuth(v){ try{ v ? localStorage.setItem(AUTH_KEY, v) : localStorage.removeItem(AUTH_KEY); }catch(e){} }
+/* 会话模式：登录成功后服务端下发 HttpOnly 签名 cookie（scan_sess），
+   之后前端不再发 Basic —— 服务端省掉每请求 1.2s 的 bcrypt，且重启后依然有效。
+   凭据仍留在 localStorage 仅用于「cookie 过期后自动换新」，不参与常规请求。 */
+const SESS_KEY = AUTH_KEY + ':sess';
+function sessOn(){ try{ return localStorage.getItem(SESS_KEY) === '1'; }catch(e){ return false; } }
+function setSess(v){ try{ v ? localStorage.setItem(SESS_KEY, '1') : localStorage.removeItem(SESS_KEY); }catch(e){} }
 /* 角色：guest（游客）/ user（常规用户）/ admin（管理员）。
    旧版是「有凭据即管理员」的二元判断，现改为以 /api/whoami 回包为准；
    缓存到 localStorage 只是为了让同步渲染路径（isAdmin()）在首屏就能拿到值，
@@ -401,7 +407,7 @@ async function refreshMe(){
   }catch(e){ /* 网络异常：保持缓存角色，不清登录态 */ }
   updateAuthBadge();
 }
-function _authHeaders(h){ const a = getAuth(); if(a){ h = h || {}; h['Authorization'] = 'Basic ' + a; } return h || {}; }
+function _authHeaders(h){ const a = getAuth(); if(a && !sessOn()){ h = h || {}; h['Authorization'] = 'Basic ' + a; } return h || {}; }
 function updateAuthBadge(){
   const badge = document.getElementById('auth-badge'), btn = document.getElementById('auth-btn'), lo = document.getElementById('logout-btn');
   if(!badge) return;
@@ -428,21 +434,31 @@ async function doLogin(){
   if(!u || !p){ document.getElementById('loginMsg').textContent = '请输入账号和密码'; return; }
   const token = btoa(u + ':' + p);
   try{
-    const r = await fetch('/api/history', { headers: { 'Authorization': 'Basic ' + token } });
+    // 一次 Basic 校验（服务端 ~1.2s + 签发会话 cookie），换来后续 12h 免 bcrypt
+    const r = await fetch('/api/whoami', { headers: { 'Authorization': 'Basic ' + token } });
     if(r.ok){
-      setAuth(token);
-      // 登录成功后立刻问一次身份：常规用户与管理员看到的功能不同
+      setAuth(token); setSess(true);
+      const d = await r.json();
+      ME = { user: d.user || '', role: d.role || 'guest', quota: d.quota || null };
+      setRole(ME.role);
+      // 复核 cookie 真的生效：不带 Authorization 再问一次，失败则退回 Basic 模式
       try{
-        const wr = await fetch('/api/whoami', { headers: {'Authorization': 'Basic ' + token} });
-        if(wr.ok){ const d = await wr.json(); ME = { user: d.user || '', role: d.role || 'admin' }; setRole(ME.role); }
-        else { setRole('admin'); }
-      }catch(e){ setRole('admin'); }
+        const wr = await fetch('/api/whoami');
+        if(wr.ok){
+          const w = await wr.json();
+          if(!(w.user === ME.user && w.role === ME.role)) setSess(false);
+        } else { setSess(false); }
+      }catch(e){ setSess(false); }
+      if(getRole() === 'guest') setSess(false);   // 无有效角色时不启用会话模式
       updateAuthBadge(); closeLoginModal(); document.getElementById('loginPass').value=''; loadHistory();
     }
     else { document.getElementById('loginMsg').textContent = r.status === 401 ? '账号或密码错误' : '登录失败(' + r.status + ')'; }
   }catch(e){ document.getElementById('loginMsg').textContent = '网络错误'; }
 }
-function logout(){ setAuth(''); setRole(''); ME = { user: '', role: 'guest' }; updateAuthBadge(); loadHistory(); }
+async function logout(){
+  try{ await fetch('/api/logout', { method:'POST', credentials:'same-origin' }); }catch(e){ /* 清本地即可 */ }
+  setAuth(''); setRole(''); setSess(false); ME = { user: '', role: 'guest' }; updateAuthBadge(); loadHistory();
+}
 // 「需要登录」：任何登录角色（常规用户/管理员）都算
 function requireLogin(){ if(isMember()) return true; openLoginModal(); return false; }
 // 「需要管理员」：常规用户明确告知无权限（不是没登录，弹登录框会更困惑）
@@ -450,8 +466,19 @@ function requireAdmin(){ if(isAdmin()) return true; if(isMember()){ alert('该�
 function authFetch(url, opts){
   opts = opts || {};
   opts.headers = _authHeaders(opts.headers);
-  return fetch(url, opts).then(r => {
-    if(r.status === 401){ setAuth(''); updateAuthBadge(); openLoginModal(); }
+  if(sessOn()) opts.credentials = 'same-origin';   // 让浏览器带上 scan_sess
+  return fetch(url, opts).then(async r => {
+    if(r.status === 401){
+      // cookie 过期/服务端轮换密码 → 用留存的凭据换一次新会话，成功则重放本次请求
+      if(sessOn() && getAuth()){
+        setSess(false);
+        const retry = Object.assign({}, opts, { headers: _authHeaders(opts.headers) });
+        const r2 = await fetch(url, retry);
+        if(r2.ok) return r2;
+        r = r2;
+      }
+      if(r.status === 401){ setAuth(''); setSess(false); updateAuthBadge(); openLoginModal(); }
+    }
     else if(r.status === 403){ openLoginModal(); }
     return r;
   });
@@ -467,7 +494,7 @@ function authEventSource(url){
   const ctrl = new AbortController();
   let closed = false;
   const emit = (ev, payload) => (handlers[ev]||[]).forEach(f => f(payload));
-  fetch(url, { headers: _authHeaders(), signal: ctrl.signal }).then(async r => {
+  fetch(url, { headers: _authHeaders(), credentials: 'same-origin', signal: ctrl.signal }).then(async r => {
     if(!r.ok){
       if(r.status === 401){ setAuth(''); updateAuthBadge(); }
       if(r.status === 401 || r.status === 403) openLoginModal();

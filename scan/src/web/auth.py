@@ -39,12 +39,14 @@
 import base64
 import hashlib
 import hmac
+import json
 import os
 import threading
 import time
 from collections import OrderedDict, defaultdict
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
@@ -89,6 +91,99 @@ def _cache_clear() -> None:
     """测试/轮换凭据后用：清空缓存（服务重启也会清）。"""
     with _VERIFIED_LOCK:
         _VERIFIED.clear()
+
+
+# ── 会话 cookie：把「每请求 1.2 秒」换成「每 12 小时一次」──────────────────
+# 进程内 LRU（上面）能救热请求，但**重启即清空**，首个带凭据请求仍要 1.2s。
+# 这里签发 **HMAC 签名的无状态 cookie**：服务端不存会话表，重启后立即有效；
+# 校验只算一次 HMAC（微秒级）。失效条件三条，全部内建在 token 里：
+#   * 过期（e）—— 默认 12h；
+#   * 改密码/轮换哈希 —— token 绑「存储哈希前 12 位」（h），一变即失效；
+#   * 账号被移除 —— 校验时回查 accounts。
+# 密钥放服务器本地文件（600，不在仓库）：读不到又不写不了 → 不签发，自动退回 Basic。
+SESSION_COOKIE = "scan_sess"
+SESSION_TTL = 12 * 3600
+_SECRET_PATH = Path(os.environ.get("SCAN_SESS_FILE", "/root/.scanweb-sess"))
+_secret_cache: bytes | None = None
+
+
+def load_session_secret(path: Path | None = None) -> bytes | None:
+    """读（或首次生成）签名密钥。失败返回 None → 只走 Basic，不签发 cookie。"""
+    global _secret_cache
+    if _secret_cache:
+        return _secret_cache
+    p = Path(path or _SECRET_PATH)
+    try:
+        raw = p.read_bytes().strip()
+        if len(raw) >= 32:
+            _secret_cache = raw
+            return raw
+    except FileNotFoundError:
+        pass
+    except Exception:
+        return None
+    try:
+        # 先建后 chmod，避免读到半写文件；内容为 64 位十六进制
+        tmp = p.with_suffix(".tmp")
+        tmp.write_bytes(os.urandom(32).hex().encode() + b"\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, p)
+        raw = p.read_bytes().strip()
+        _secret_cache = raw
+        return raw
+    except Exception:
+        return None
+
+
+def _b64e(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64d(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def issue_session(
+    user: str, role: str, stored: str, secret: bytes, ttl: int = SESSION_TTL
+) -> str:
+    """签发会话 token：`base64url(payload).hmac_sha256_hex`。role 只作展示，鉴权时以凭据文件为准。"""
+    payload = {
+        "u": user,
+        "r": role,
+        "h": (stored or "")[:12],
+        "e": int(time.time()) + int(ttl),
+    }
+    body = _b64e(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    sig = hmac.new(secret, body.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{body}.{sig}"
+
+
+def verify_session(token: str, accounts: dict[str, tuple[str, str]], secret: bytes) -> tuple[str, str] | None:
+    """校验会话 token → `(账号, 角色)`；任何异常一律当无效（返回 None）。"""
+    if not token or not secret:
+        return None
+    try:
+        body, sig = token.rsplit(".", 1)
+        want = hmac.new(secret, body.encode("ascii"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, want):
+            return None
+        payload = json.loads(_b64d(body).decode("utf-8"))
+        if int(payload.get("e", 0)) < int(time.time()):
+            return None
+        user = str(payload.get("u") or "")
+        entry = accounts.get(user)
+        if not entry:
+            return None
+        stored, role = entry
+        # 哈希前缀必须一致：改密码 / 轮换哈希 → 旧会话立刻作废
+        if (stored or "")[:12] != str(payload.get("h") or ""):
+            return None
+        role = normalize_role(role)
+        if role == GUEST:      # 凭据文件不授予游客身份
+            return None
+        return user, role
+    except Exception:
+        return None
 
 
 def verify_credentials(
@@ -167,6 +262,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         is_read_allowed: Callable[[str, str], bool],
         member_allowed: Callable[[str, str], bool] | None = None,
         rate_limits: list[tuple[str, int, int]] | None = None,
+        session_secret: bytes | None = None,
+        session_ttl: int = SESSION_TTL,
     ):
         super().__init__(app)
         self.accounts: dict[str, tuple[str, str]] = dict(accounts or {})
@@ -176,6 +273,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self.is_read_allowed = is_read_allowed
         self.member_allowed = member_allowed
         self.rate_limits = rate_limits or []
+        # 会话签名密钥；为 None 时不签发 cookie（只走 Basic + 进程内缓存）
+        self.session_secret = session_secret
+        self.session_ttl = int(session_ttl)
         self._hits: dict[tuple[str, str], list[float]] = defaultdict(list)
 
     def _rate_ok(self, ip: str, path: str) -> tuple[bool, int]:
@@ -191,6 +291,48 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     return False, 429
         return True, 0
 
+    def _denied(self, method: str, path: str, role: str) -> JSONResponse | None:
+        """按角色判权（Basic 与 cookie 两条路径共用，避免两套判断漂移）。"""
+        if role == ADMIN:
+            return None
+        if role == USER and self.member_allowed is not None:
+            allowed = self.member_allowed(method, path)
+        else:
+            allowed = method in ("GET", "HEAD", "OPTIONS") and self.is_read_allowed(method, path)
+        if allowed:
+            return None
+        return JSONResponse(
+            {"detail": "权限不足：该操作需要管理员", "role": role},
+            status_code=403,
+            headers={"X-Role": role},
+        )
+
+    @staticmethod
+    def _same_site(request) -> bool:
+        """cookie 认证下的 CSRF 防线：写操作必须同站。
+
+        SameSite=Lax 已挡掉跨站 POST；这里再兜一层，防止老浏览器/异常代理
+        把 cookie 带进跨站请求。无 Origin/Referer 时看 Sec-Fetch-Site。
+        """
+        origin = request.headers.get("origin") or request.headers.get("referer") or ""
+        if not origin:
+            return request.headers.get("sec-fetch-site", "").lower() != "cross-site"
+        try:
+            o_host = (urlparse(origin).hostname or "").lower()
+        except Exception:
+            return False
+        req_host = (request.url.hostname or "").lower()
+        return bool(o_host) and o_host == req_host
+
+    @staticmethod
+    def _is_https(request) -> bool:
+        if request.url.scheme == "https":
+            return True
+        if request.headers.get("x-forwarded-proto", "").lower().startswith("https"):
+            return True
+        # CF 在回源请求里带 cf-visitor: {"scheme":"https"}
+        return '"scheme":"https"' in request.headers.get("cf-visitor", "").replace(" ", "")
+
     async def dispatch(self, request, call_next):
         path = request.url.path
         method = request.method
@@ -199,42 +341,58 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # 身份写进 scope：路由层要靠它做行级可见性判断（列表过滤 / 详情 404）
         state = request.scope.setdefault("state", {})
         state["user"], state["role"] = "", GUEST
+        new_cookie: str | None = None
 
         if auth.strip():
             hit = verify_credentials(auth, self.accounts)
             if hit is None:
                 return JSONResponse({"detail": "凭据无效"}, status_code=401)
             user, role = hit
-            state["user"], state["role"] = user, role
+            # 顺手升级成会话 cookie：前端登录取到它之后就不再发 Basic，
+            # 后续请求只算 HMAC（重启也不影响）。
+            if self.session_secret:
+                stored = self.accounts.get(user, ("", ""))[0]
+                new_cookie = issue_session(user, role, stored, self.session_secret, self.session_ttl)
+        else:
+            token = request.cookies.get(SESSION_COOKIE, "")
+            hit = verify_session(token, self.accounts, self.session_secret) if (token and self.session_secret) else None
+            if hit is None:
+                # 游客：只读白名单
+                if method in ("GET", "HEAD", "OPTIONS") and self.is_read_allowed(method, path):
+                    ok, code = self._rate_ok(request.client.host if request.client else "?", path)
+                    if not ok:
+                        return JSONResponse({"detail": "请求过于频繁"}, status_code=code)
+                    return await call_next(request)
+                return JSONResponse(
+                    {"detail": "游客只读模式：此操作需要登录后使用"},
+                    status_code=403,
+                    headers={"X-Guest-Only": "1"},
+                )
+            user, role = hit
+            # cookie 会随同站请求自动附带 → 写操作必须校验来源
+            if method not in ("GET", "HEAD", "OPTIONS") and not self._same_site(request):
+                return JSONResponse({"detail": "跨站请求被拒绝"}, status_code=403)
 
-            if role != ADMIN:
-                if role == USER and self.member_allowed is not None:
-                    allowed = self.member_allowed(method, path)
-                else:
-                    allowed = method in ("GET", "HEAD", "OPTIONS") and self.is_read_allowed(method, path)
-                if not allowed:
-                    return JSONResponse(
-                        {"detail": "权限不足：该操作需要管理员", "role": role},
-                        status_code=403,
-                        headers={"X-Role": role},
-                    )
-            ok, code = self._rate_ok(request.client.host if request.client else "?", path)
-            if not ok:
-                return JSONResponse({"detail": "请求过于频繁"}, status_code=code)
-            return await call_next(request)
+        state["user"], state["role"] = user, role
+        denied = self._denied(method, path, role)
+        if denied is not None:
+            return denied
+        ok, code = self._rate_ok(request.client.host if request.client else "?", path)
+        if not ok:
+            return JSONResponse({"detail": "请求过于频繁"}, status_code=code)
 
-        # 游客：只读白名单
-        if method in ("GET", "HEAD", "OPTIONS") and self.is_read_allowed(method, path):
-            ok, code = self._rate_ok(request.client.host if request.client else "?", path)
-            if not ok:
-                return JSONResponse({"detail": "请求过于频繁"}, status_code=code)
-            return await call_next(request)
-
-        return JSONResponse(
-            {"detail": "游客只读模式：此操作需要登录后使用"},
-            status_code=403,
-            headers={"X-Guest-Only": "1"},
-        )
+        response = await call_next(request)
+        if new_cookie:
+            response.set_cookie(
+                SESSION_COOKIE,
+                new_cookie,
+                max_age=self.session_ttl,
+                httponly=True,
+                samesite="lax",
+                path="/",
+                secure=self._is_https(request),
+            )
+        return response
 
 
 def load_accounts(path: str | None = None) -> dict[str, tuple[str, str]]:
